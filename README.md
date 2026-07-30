@@ -18,17 +18,19 @@ RepoMentor 希望帮助用户把复杂的开源仓库拆解成一个个可以完
 
 ## 当前版本
 
-当前版本为 V0.1。
+当前版本为 V0.2开发阶段。
 
 现阶段主要目标是读取以下输入：
 
-1. 用户当前技术基础；
-2. 用户学习目标；
-3. 用户每天可投入的时间；
-4. 仓库 README；
-5. 仓库目录结构。
+目前已经完成：
 
-当前程序可以读取并展示这些测试数据。
+- 项目基础目录搭建；
+- 用户资料、仓库 README 和目录树读取；
+- 模型配置文件读取；
+- 模型配置合法性检查；
+- API Key 安全管理。
+
+当前还没有正式调用大模型生成学习路线。
 
 ## 后续计划
 
@@ -61,16 +63,40 @@ RepoMentor 希望帮助用户把复杂的开源仓库拆解成一个个可以完
 repo-mentor/
 ├── src/
 │   └── repo_mentor/
+│       ├── __init__.py
+│       ├── config.py
+│       └── main.py
 ├── data/
 │   └── demo_repo/
-├── tests/
 ├── docs/
+│   └── learning-log.md
 ├── .env.example
 ├── .gitignore
 ├── requirements.txt
 └── README.md
 ```
 
+## 环境配置
+
+项目使用 `.env` 保存本地模型配置。
+
+首先复制项目根目录中的：
+
+```text
+.env.example
+```
+并创建一个新的：
+```text
+.env
+```
+在`.env`文件中填写自己的大模型
+```aiexclude
+MODEL_PROVIDER：模型服务提供商；
+MODEL_NAME：使用的模型名称；
+MODEL_API_KEY：模型平台提供的 API Key；
+MODEL_BASE_URL：自定义接口地址，没有时可以留空；
+TEMPERATURE：模型生成随机性，当前建议设置为 0.2
+```
 ## 运行方式
 
 创建并激活 Python 虚拟环境后，安装依赖：
@@ -82,8 +108,17 @@ pip install -r requirements.txt
 运行当前版本：
 
 ```bash
-python -m src.repo_mentor.main
+python -m src.repo_mentor.config
 ```
+## 下一步计划
+
+下一阶段将完成：
+
+1. 接入一个真实的大模型服务；
+2. 封装模型调用模块；
+3. 使用固定测试数据完成第一次模型调用；
+4. 根据用户资料和仓库信息生成初步学习路线；
+5. 增加模型调用异常处理。
 
 ## 项目状态
 
