@@ -1,5 +1,15 @@
 {
   "current_level": "会Python基础，了解Agent理论，但没有完成过Agent项目",
+  "known_skills": [
+    "Python基础语法",
+    "函数与类",
+    "基础文件读写"
+  ],
+  "unfamiliar_skills": [
+    "Agent工具调用",
+    "LangGraph工作流",
+    "RAG"
+  ],
   "learning_goal": "理解一个简单Agent项目的整体工作流程",
   "daily_hours": 2,
   "available_days": 7
