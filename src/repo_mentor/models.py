@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+#限制变量只能填写指定的几个固定字符串 / 数值，不能随便乱写。
 from typing import Literal
 
+
+#Pydantic 是 Python 最常用数据校验、结构化数据工具（LLM 项目标配，用来规范大模型输出 JSON）
+#BaseModel基础模型类。新建类继承它，就能实现：自动类型校验字典 ↔ 对象互相转换自动解析 JSON 字符串
+#Field给字段附加规则、默认值、注释、描述。
+#ConfigDict：给整个模型设置全局配置。
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -32,8 +38,8 @@ class StrictModel(BaseModel):
     """RepoMentor严格数据模型基类。"""
 
     model_config = ConfigDict(
-        extra="forbid",
-        str_strip_whitespace=True,
+        extra="forbid",#不允许出现没定义的字段
+        str_strip_whitespace=True,#允许一些特殊类型
     )
 
 

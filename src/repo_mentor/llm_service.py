@@ -4,24 +4,32 @@ from langchain_deepseek import ChatDeepSeek
 from config import ConfigError , load_settings
 
 
-def create_llm()->ChatDeepSeek:
-    """创建并返回Deepseek大模型实例"""
-    try:
-        settings = load_settings()
-    except ConfigError as error:
-        print("=" * 50)
-        print("配置检查失败")
-        print("=" * 50)
-        print(error)
-        raise SystemExit(1) from error
-    return  ChatDeepSeek(
+def create_llm(
+    *,
+    thinking_enabled: bool = False,
+) -> ChatDeepSeek:
+    """创建并返回DeepSeek大模型实例。"""
+    settings = load_settings()
+
+    thinking_type = (
+        "enabled"
+        if thinking_enabled
+        else "disabled"
+    )
+
+    return ChatDeepSeek(
         model=settings.model_name,
         temperature=settings.temperature,
         max_tokens=None,
         timeout=None,
         max_retries=2,
         api_key=settings.model_api_key,
-        # other params...
+        base_url=settings.model_base_url,
+        extra_body={
+            "thinking": {
+                "type": thinking_type,
+            }
+        },
     )
 
 

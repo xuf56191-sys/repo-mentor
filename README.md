@@ -100,11 +100,15 @@ RepoMentor 后续将结合 openEuler 开源实习进行真实场景验证。
 - 完成三版学习路线Prompt对照实验；
 - 建立学习者、目标任务、仓库证据和学习路线数据模型；
 - 完成合法数据、错误字段和错误时间的模型校验。
+- 使用Pydantic定义结构化学习路线；
+- 使用DeepSeek生成经过Schema校验的LearningRoadmap；
+- 将结构化路线导出为JSON；
+- 将学习路线渲染为可阅读的Markdown；
+- 支持重新读取JSON并再次完成数据校验；
+- 增加计划天数和每日学习时间的基础检查。
 
 当前还没有完成：
 
-- 根据仓库信息生成正式学习路线；
-- 使用 Pydantic 约束学习路线结构；
 - 自动读取真实本地仓库；
 - LangGraph 工作流；
 - 代码库 RAG 问答；
@@ -177,6 +181,7 @@ repo-mentor/
 │       └── model.py
 │       └── model_demo.py
 │       └── prompt_experiment.py
+│       └── roadmap_generator.py
 ├── data/
 │   └── demo_repo/
 │       ├── user_profile.json

@@ -92,6 +92,18 @@ def test_valid_model() -> None:
     roadmap = build_sample_roadmap()
 
     OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    r"""
+        json.dumps(数据) = 把 Python 对象（dict/list）转成格式化 JSON 字符串
+        参数说明：
+        ensure_ascii=False
+        ❗关键：中文不转成 \uXXXX 编码，直接显示汉字。
+        如果开默认 True，中文会变成 "\u4e2d\u6587"，LLM 阅读体验差。
+        indent=2
+        换行 + 缩进 2 空格，输出美观、分行的 JSON 文本，方便人 / AI 阅读；
+        不加 indent 就是挤成一行。
+        """
+
     output_text = json.dumps(
         roadmap.model_dump(),
         ensure_ascii=False,

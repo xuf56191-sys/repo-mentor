@@ -188,3 +188,89 @@ json文件如果为空，会报错。
 ### 下一步
 
 让DeepSeek按照LearningRoadmap模型返回结构化结果。
+
+## 2026-08-04：结构化学习路线输出与导出
+
+### 今天的目标
+
+将证据驱动Prompt、DeepSeek模型和Pydantic学习路线模型连接，
+生成可以被程序直接使用的结构化学习路线。
+
+### 今天完成
+
+- 从三版实验Prompt中整理正式Prompt；
+- 使用`with_structured_output`绑定`LearningRoadmap`；
+- 使用`include_raw=True`保留解析错误信息；
+- 成功获得`LearningRoadmap`对象；
+- 将学习路线保存为`roadmap.json`；
+- 将学习路线渲染为`roadmap.md`；
+- 重新读取JSON并通过Pydantic校验；
+- 检查计划天数和每天预计时间；
+- 人工检查文件幻觉和内容推断。
+
+### 今天理解的内容
+
+- Prompt负责约束模型应该生成什么内容；
+- Pydantic负责约束程序最终接受什么数据；
+- 结构正确不代表内容一定正确；
+- Pydantic可以发现缺字段和类型错误，但不能自动判断源码事实；
+- 仓库文件真实性和源码推断仍然需要额外校验；
+- Markdown应该由程序根据结构化对象生成，而不是让模型同时负责格式和内容。
+
+### 测试结果
+
+1. 模型返回类型：
+   - `LearningRoadmap` 
+   - 结果：通过
+2. JSON重新读取结果：
+   - 成功重新创建`LearningRoadmap`
+   - 结果：通过
+3. Markdown显示结果：
+   - 成功生成`outputs/roadmap.md`
+   - 结果：通过
+4. 是否出现不存在文件：
+    -并未出现
+5. 质量检查：
+   - 成功发现7天全部超时；
+   - 说明结构化输出正确不代表内容质量正确。
+6. 是否超过每日时间限制：
+   - 结果：未通过
+   - 模型每天生成两个2小时任务，
+     导致每天总时间为4小时，
+     超过用户每天可用的2小时。
+
+
+### 遇到的问题
+
+**问题一**：**使用DeepSeek思考模式配合LangChain
+`with_structured_output(method="function_calling")`
+时，API返回400错误：
+
+`Thinking mode does not support this tool_choice`
+
+原因是function calling会通过tool_choice要求模型调用结构化输出工具，
+而DeepSeek V4思考模式不接受该参数。
+
+解决方法是在结构化输出调用中通过
+`extra_body={"thinking": {"type": "disabled"}}`
+关闭思考模式，继续使用function calling生成Pydantic对象。
+
+**问题二：** `roadmap.model_dump(mode="json")`写成了`roadmap.model_dump(model="json")`
+
+**问题三：**
+Prompt虽然要求每天任务不能超过用户可用时间，
+但没有明确说明`estimated_hours`表示一个LearningTask中
+阅读、定位和实践活动的总时间。
+模型将每天可用的2小时分配给了每一个LearningTask，
+从而导致每天总时间变成4小时。
+
+**解决方法：**
+
+- 明确每天所有任务时间之和不得超过`daily_hours`；
+- 明确`estimated_hours`表示完整任务总时间；
+- V0.2阶段限制每天只生成一个LearningTask；
+- 增加总时间、任务数量和day编号检查。
+### 下一步
+
+使用多组学习者画像和目标任务验证学习路线的差异，
+并完成V0.2阶段评测。
