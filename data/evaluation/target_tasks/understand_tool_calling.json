@@ -1,0 +1,7 @@
+{
+  "title": "理解Demo Agent的工具调用流程",
+  "description": "理解Agent如何根据用户输入决定是否调用搜索工具或计算器工具，并在工具执行后生成最终回答",
+  "task_type": "understand_module",
+  "expected_outcome": "能够用自己的话说明从用户输入、模型决策、工具执行到最终回答的完整数据流",
+  "reference": null
+}

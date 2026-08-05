@@ -1,0 +1,7 @@
+{
+  "title": "为Demo Agent新增一个天气工具做准备",
+  "description": "了解现有搜索工具和计算器工具可能的组织方式，识别新增天气工具需要进一步检查的文件和知识点",
+  "task_type": "add_feature",
+  "expected_outcome": "能够列出新增工具前需要阅读的文件、需要确认的问题、测试思路和实现准备步骤",
+  "reference": null
+}

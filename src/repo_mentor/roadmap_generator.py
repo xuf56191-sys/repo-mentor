@@ -33,7 +33,7 @@ def load_json_file(filename: str) -> dict:
     if not content:
         raise ValueError(f"JSON文件为空：{file_path}")
 
-    return json.loads(content)
+    return json.loads(content) #把 JSON 格式的字符串 → 转成 Python 对象（dict /list）
 
 def load_text_file(filname:str) -> dict:
     """读取演示文本数据"""
@@ -71,8 +71,13 @@ def build_prompt_inputs() -> dict[str,str]:
 
 
 
-def generate_structured_roadmap() -> LearningRoadmap:
-    """调用DeepSeek生成经过Pydantic校验的学习路线。"""
+def generate_structured_roadmap(
+    user_profile: dict,
+    target_task: dict,
+    repository_readme: str,
+    repository_tree: str,
+) -> LearningRoadmap:
+    """根据指定输入生成结构化学习路线。"""
     llm = create_llm(
         thinking_enabled=False,
     )
@@ -83,7 +88,23 @@ def generate_structured_roadmap() -> LearningRoadmap:
         include_raw=True,
     )
 
-    prompt_inputs = build_prompt_inputs()
+    # prompt_inputs = build_prompt_inputs()
+
+    prompt_inputs = {
+        "user_profile": json.dumps(
+            user_profile,
+            ensure_ascii=False,
+            indent=2,
+        ),
+        "target_task": json.dumps(
+            target_task,
+            ensure_ascii=False,
+            indent=2,
+        ),
+        "repository_readme": repository_readme,
+        "repository_tree": repository_tree,
+    }
+
     messages = FINAL_ROADMAP_PROMPT.format_messages(
         **prompt_inputs
     )
@@ -107,6 +128,7 @@ def generate_structured_roadmap() -> LearningRoadmap:
             "模型没有返回可用的LearningRoadmap对象。"
         )
 
+    #isinstance(变量, 类)：检查变量是不是这个类的实例对象。
     if not isinstance(parsed, LearningRoadmap):
         raise TypeError(
             "结构化输出类型错误，"
@@ -341,12 +363,23 @@ def review_roadmap(
 
 def main() -> None:
     """生成、导出并重新验证学习路线。"""
+
     try:
         print("=" * 60)
         print("正在生成结构化学习路线")
         print("=" * 60)
 
-        roadmap = generate_structured_roadmap()
+        user_profile = load_json_file("user_profile.json")
+        target_task = load_json_file("target_task.json")
+        repository_readme = load_text_file("README.md")
+        repository_tree = load_text_file("tree.txt")
+
+        roadmap = generate_structured_roadmap(
+            user_profile=user_profile,
+            target_task=target_task,
+            repository_readme=repository_readme,
+            repository_tree=repository_tree,
+        )
 
         print("结构化输出成功")
         print(f"返回类型：{type(roadmap).__name__}")

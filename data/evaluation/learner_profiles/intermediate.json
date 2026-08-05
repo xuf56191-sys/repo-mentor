@@ -1,0 +1,17 @@
+{
+  "current_level": "熟悉Python，使用过LangChain完成简单模型调用和工具调用，但不熟悉完整Agent工作流",
+  "known_skills": [
+    "Python项目开发",
+    "LangChain基础",
+    "模型调用",
+    "基础Tool Calling"
+  ],
+  "unfamiliar_skills": [
+    "工作流节点组织",
+    "状态传递",
+    "复杂工具路由"
+  ],
+  "learning_goal": "快速理解项目中的工作流组织和工具调用数据流",
+  "daily_hours": 2,
+  "available_days": 4
+}

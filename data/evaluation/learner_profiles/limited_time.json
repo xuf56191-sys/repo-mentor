@@ -1,0 +1,15 @@
+{
+  "current_level": "会Python基础，但没有Agent项目经验，可用学习时间较少",
+  "known_skills": [
+    "Python基础语法",
+    "函数基础"
+  ],
+  "unfamiliar_skills": [
+    "Agent工作流程",
+    "工具调用",
+    "状态管理"
+  ],
+  "learning_goal": "在有限时间内理解Demo Agent最核心的工具调用过程",
+  "daily_hours": 1,
+  "available_days": 3
+}
