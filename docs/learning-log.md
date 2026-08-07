@@ -399,3 +399,203 @@ Git元数据：未发现.git`
 
 根据经过校验的本地仓库路径生成安全、有限制的目录树，
 并忽略`.git`、虚拟环境和缓存目录。
+
+## 2026-08-07：安全生成真实仓库目录树
+
+### 今天的目标
+
+根据经过校验的本地仓库路径，
+生成稳定、安全且有限制的真实目录树。
+
+### 今天完成
+
+- 创建`repository_tree.py`；
+- 使用`Path.iterdir()`遍历真实仓库；
+- 自动区分文件和目录；
+- 对目录和文件进行稳定排序；
+- 默认忽略`.git`、`.idea`、`.venv`、`.env`和缓存目录；
+- 增加最大扫描深度；
+- 增加最大文件数量；
+- 达到限制时返回截断提示；
+- 不跟随符号链接；
+- 记录扫描文件数和目录数；
+- 在RepoMentor和另一个真实项目上完成测试。
+
+### 今天理解的内容
+
+- 目录扫描必须设置范围限制；
+- 不能直接递归一个未知大小的仓库；
+- 目录树应该保持稳定排序，方便测试和后续模型输入；
+- `.git`和`.env`不应该进入模型上下文；
+- `.env.example`可以保留；
+- 符号链接可能让递归扫描离开目标仓库；
+- 路径真实存在不等于源码内容已经被理解。
+
+### 测试结果
+
+1. RepoMentor正常目录树：
+   - 结果：
+    `check .env, ignore=True
+check .env.example, ignore=False
+check .git, ignore=True
+check .gitignore, ignore=False
+check .idea, ignore=True
+check data, ignore=False
+check docs, ignore=False
+check evaluation, ignore=False
+check outputs, ignore=False
+check README.md, ignore=False
+check requirements.txt, ignore=False
+check src, ignore=False
+check tests, ignore=False
+check demo_repo, ignore=False
+check evaluation, ignore=False
+check README.md, ignore=False
+check target_task.json, ignore=False
+check tree.txt, ignore=False
+check user_profile.json, ignore=False
+check learner_profiles, ignore=False
+check target_tasks, ignore=False
+check beginner.json, ignore=False
+check intermediate.json, ignore=False
+check limited_time.json, ignore=False
+check prepare_new_tool.json, ignore=False
+check understand_tool_calling.json, ignore=False
+check learning-code.md, ignore=False
+check learning-log.md, ignore=False
+check product-positioning.md, ignore=False
+check prompt-experiments.md, ignore=False
+check roadmap_review.md, ignore=False
+check evaluation, ignore=False
+check prompt_experiments, ignore=False
+check roadmap.json, ignore=False
+check roadmap.md, ignore=False
+check sample_roadmap.json, ignore=False
+check beginner__prepare_new_tool.json, ignore=False
+check beginner__prepare_new_tool.md, ignore=False
+check beginner__understand_tool_calling.json, ignore=False
+check beginner__understand_tool_calling.md, ignore=False
+check intermediate__prepare_new_tool.json, ignore=False
+check intermediate__prepare_new_tool.md, ignore=False
+check intermediate__understand_tool_calling.json, ignore=False
+check intermediate__understand_tool_calling.md, ignore=False
+check limited_time__prepare_new_tool.json, ignore=False
+check limited_time__prepare_new_tool.md, ignore=False
+check limited_time__understand_tool_calling.json, ignore=False
+check limited_time__understand_tool_calling.md, ignore=False
+check v1_baseline.md, ignore=False
+check v2_constrained.md, ignore=False
+check v3_evidence_based.md, ignore=False
+check repo_mentor, ignore=False
+check config.py, ignore=False
+check evaluation_runner.py, ignore=False
+check llm_service.py, ignore=False
+check main.py, ignore=False
+check models.py, ignore=False
+check model_demo.py, ignore=False
+check prompts.py, ignore=False
+check prompt_experiment.py, ignore=False
+check repository_service.py, ignore=False
+check repository_tree.py, ignore=False
+check roadmap_generator.py, ignore=False
+check __init__.py, ignore=False
+check __pycache__, ignore=True
+============================================================
+仓库目录树
+============================================================
+repo-mentor/
+ ├── data/
+ │   ├── demo_repo/
+ │   │   ├── README.md
+ │   │   ├── target_task.json
+ │   │   ├── tree.txt
+ │   │   └── user_profile.json
+ │   └── evaluation/
+ │       ├── learner_profiles/
+ │       │   ├── beginner.json
+ │       │   ├── intermediate.json
+ │       │   └── limited_time.json
+ │       └── target_tasks/
+ │           ├── prepare_new_tool.json
+ │           └── understand_tool_calling.json
+ ├── docs/
+ │   ├── learning-code.md
+ │   ├── learning-log.md
+ │   ├── product-positioning.md
+ │   └── prompt-experiments.md
+ ├── evaluation/
+ │   └── roadmap_review.md
+ ├── outputs/
+ │   ├── evaluation/
+ │   │   ├── beginner__prepare_new_tool.json
+ │   │   ├── beginner__prepare_new_tool.md
+ │   │   ├── beginner__understand_tool_calling.json
+ │   │   ├── beginner__understand_tool_calling.md
+ │   │   ├── intermediate__prepare_new_tool.json
+ │   │   ├── intermediate__prepare_new_tool.md
+ │   │   ├── intermediate__understand_tool_calling.json
+ │   │   ├── intermediate__understand_tool_calling.md
+ │   │   ├── limited_time__prepare_new_tool.json
+ │   │   ├── limited_time__prepare_new_tool.md
+ │   │   ├── limited_time__understand_tool_calling.json
+ │   │   └── limited_time__understand_tool_calling.md
+ │   ├── prompt_experiments/
+ │   │   ├── v1_baseline.md
+ │   │   ├── v2_constrained.md
+ │   │   └── v3_evidence_based.md
+ │   ├── roadmap.json
+ │   ├── roadmap.md
+ │   └── sample_roadmap.json
+ ├── src/
+ │   └── repo_mentor/
+ │       ├── __init__.py
+ │       ├── config.py
+ │       ├── evaluation_runner.py
+ │       ├── llm_service.py
+ │       ├── main.py
+ │       ├── model_demo.py
+ │       ├── models.py
+ │       ├── prompt_experiment.py
+ │       ├── prompts.py
+ │       ├── repository_service.py
+ │       ├── repository_tree.py
+ │       └── roadmap_generator.py
+ ├── tests/
+ ├── .env.example
+ ├── .gitignore
+ ├── README.md
+ └── requirements.txt
+
+============================================================
+扫描统计
+============================================================
+文件数量：48
+目录数量：13
+是否截断：否`
+
+2. `.git/.idea/.venv/.env`：
+   - 是否成功忽略：是
+
+3. `max_depth=1`：
+   - 结果：
+
+4. `max_files=5`：
+   - 结果：
+
+5. 错误`max_depth=0`：
+   - 结果：
+
+6. 错误`max_files=0`：
+   - 结果：
+
+7. 另一个真实项目：
+   - 结果：
+
+### 遇到的问题
+
+无。
+
+### 下一步
+
+安全读取真实仓库中的README、CONTRIBUTING和项目配置文件，
+为学习路线提供真实的仓库文本证据。
