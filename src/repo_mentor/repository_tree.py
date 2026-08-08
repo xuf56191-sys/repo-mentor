@@ -25,6 +25,7 @@ DEFAULT_IGNORES_NAMES = {
     ".env",
     "__pycache__",
     ".pytest_cache",
+    "outputs",
 }
 
 @dataclass
