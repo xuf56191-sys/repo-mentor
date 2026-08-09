@@ -3,7 +3,11 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
-from  repository_service import (validate_repository_path,RepositoryPathError)
+from repo_mentor.repository_service import (
+    RepositoryPathError,
+    validate_repository_path,
+)
+# from  repository_service import (validate_repository_path,RepositoryPathError)
 
 MAX_TEXT_FILE_BYTES = 200_200
 

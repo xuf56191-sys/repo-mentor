@@ -4,11 +4,18 @@ from __future__ import annotations
 
 from  dataclasses import dataclass,field
 from  pathlib import Path
-from repository_service import (
+# from repository_service import (
+#     RepositoryInfo,
+#     RepositoryPathError,
+#     validate_repository_path,
+# )
+
+from repo_mentor.repository_service import (
     RepositoryInfo,
     RepositoryPathError,
     validate_repository_path,
 )
+
 PROJECT_ROOT = (
     Path(__file__)
     .resolve()
@@ -17,7 +24,7 @@ PROJECT_ROOT = (
 
 
 #定义默认忽略目录：
-DEFAULT_IGNORES_NAMES = {
+DEFAULT_IGNORED_NAMES = {
     ".git",
     ".idea",
     ".venv",
@@ -89,7 +96,7 @@ def build_tree(
     repository_info = validate_repository_path(repository_path)
 
     if ignored_names is None:
-        ignored_names = set(DEFAULT_IGNORES_NAMES)
+        ignored_names = set(DEFAULT_IGNORED_NAMES)
     else :
         ignored_names = set(ignored_names)
 

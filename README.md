@@ -82,59 +82,35 @@ RepoMentor 后续将结合 openEuler 开源实习进行真实场景验证。
 
 ## 当前版本
 
-当前版本为 **V0.2 开发阶段**
+当前版本为 **V0.4 开发阶段**
 
-目前已经完成：
+## 当前已实现
 
-- 创建项目基础目录；
-- 读取用户学习资料；
-- 读取演示仓库 README；
-- 读取演示仓库目录结构；
-- 使用 `.env` 管理模型配置；
-- 检查模型名称、API Key 和 Temperature；
-- 接入 DeepSeek 大模型；
-- 封装模型创建和调用函数；
-- 连续两次调用模型并获得正常回复；
-- 对空 Prompt 和部分模型调用异常进行处理。
-- 明确学习者画像、目标任务和仓库证据的输入结构；
-- 完成三版学习路线Prompt对照实验；
-- 建立学习者、目标任务、仓库证据和学习路线数据模型；
-- 完成合法数据、错误字段和错误时间的模型校验。
-- 使用Pydantic定义结构化学习路线；
-- 使用DeepSeek生成经过Schema校验的LearningRoadmap；
-- 将结构化路线导出为JSON；
-- 将学习路线渲染为可阅读的Markdown；
-- 支持重新读取JSON并再次完成数据校验；
-- 增加计划天数和每日学习时间的基础检查。
-- 使用3类学习者画像和2个目标任务完成6组对照实验；
-- 验证不同学习基础、可用时间和目标任务对路线的影响；
-- 检查计划天数、每日时间和总时间约束；
-- 人工检查不存在文件、无源码依据推断和实践任务可执行性；
-- 形成V0.2差异化评测记录。
-- 支持接收和校验本地仓库路径；
-- 将用户输入转换为规范的绝对路径；
-- 检查路径是否存在、是否为目录以及是否可以访问；
-- 对空路径、不存在路径和文件路径提供明确错误提示；
-- 记录目标目录是否包含Git元数据。
-- 支持安全扫描经过校验的本地仓库；
-- 自动生成真实仓库目录树；
-- 默认忽略`.git`、`.idea`、`.venv`、`.env`和缓存目录；
-- 支持限制最大扫描深度；
-- 支持限制最大文件数量；
-- 达到扫描限制时能够返回明确截断信息；
-- 不跟随符号链接，避免扫描到仓库外部目录。
-- 支持读取真实本地仓库中的README；
-- 支持发现并读取CONTRIBUTING贡献说明；
-- 支持读取`pyproject.toml`和`requirements.txt`项目元数据；
-- 支持读取常见的`docs`入口文件；
-- 为每份读取内容记录真实来源路径和文件大小；
-- 对不存在、过大、二进制或无法解码的文件进行受控处理。
+RepoMentor 当前已经完成 V0.2 个性化路线原型，
+并正在实现 V0.4 真实仓库证据层。
+
+目前支持：
+
+- 根据学习者基础、目标任务和学习时间生成结构化学习路线；
+- 使用 Pydantic Schema 约束路线输出结构；
+- 将学习路线保存为 JSON 和 Markdown；
+- 使用多类学习者和目标任务进行差异化验证；
+- 接收并校验真实本地仓库路径；
+- 安全生成真实仓库目录树；
+- 忽略 `.git`、`.idea`、虚拟环境、缓存、`.env` 和生成结果目录；
+- 限制仓库扫描深度和文件数量；
+- 安全读取 README、CONTRIBUTING、项目配置和 docs 入口资料；
+- 为读取到的仓库资料保存真实来源路径；
+- 根据用户目标任务对真实仓库文件进行初步相关性排序；
+- 使用目标关键词、README 引用和文件角色建立可解释评分规则；
+- 输出带有分数、理由和 `RepositoryEvidence` 的 Top-N 候选文件；
+- 区分“真实路径已经确认”和“源码内容仍待确认”；
+- 开始使用 pytest 为仓库证据层增加自动化测试。
 
 当前正在完成：
-- 根据目标任务筛选真正相关的仓库文件；
-- 为候选文件建立相关性评分；
-- 将README、目录和文件路径转换为可追溯的仓库Evidence；
-- 减少模型根据文件名猜测源码实现的问题。
+- 将仓库目录树、入门资料读取、单文件读取和目标文件排序封装为Tools；
+- 让模型根据目标任务选择合适的仓库工具；
+- 为Tool Calling增加日志、范围限制和异常保护。
 
 当前还没有完成：
 
@@ -144,16 +120,59 @@ RepoMentor 后续将结合 openEuler 开源实习进行真实场景验证。
 - 测验和学习进度保存；
 - Streamlit 页面。
 
+## 目标相关仓库证据
+
+RepoMentor 不把“仓库中最重要的文件”
+直接等同于“用户当前最应该学习的文件”。
+
+例如，同一个仓库中：
+
+- 当目标是理解目录树扫描流程时，
+  `repository_tree.py`、`repository_service.py`
+  应该获得更高优先级；
+
+- 当目标是理解结构化学习路线生成流程时，
+  `roadmap_generator.py`、`models.py`、`prompts.py`
+  应该获得更高优先级。
+
+当前 V0.4 使用可解释的规则排序器，
+综合考虑：
+
+- 目标任务关键词；
+- 文件路径名称；
+- README 中的真实文件引用；
+- 入口文件；
+- 配置文件；
+- 测试文件；
+- 仓库入门与贡献资料。
+
+候选文件必须来自真实文件系统，
+而不是由模型生成文件路径。
+
+对于尚未真正读取源码内容的文件，
+RepoMentor 会将其标记为：
+
+`needs_confirmation`
+
+避免根据文件名直接推断文件内部实现。
+
 ## 当前限制
 
-当前版本只完成了本地仓库路径校验，还没有读取目标仓库中的真实文件。
+当前项目仍处于开发阶段。
 
-路径校验成功只表示该目录可以访问，并不代表：
+目前的主要限制包括：
 
-- 该目录一定是完整的Git仓库；
-- 该目录一定包含README；
-- 该目录一定是受支持的编程语言项目；
-- RepoMentor已经理解其中的源码。
+- 目标相关文件排序仍主要依赖规则和路径关键词；
+- 中文目标词到英文路径关键词的映射需要继续扩展；
+- 当前只读取 README、CONTRIBUTING、项目配置和少量 docs 入口；
+- 普通源码文件尚未进入受控读取和证据提取流程；
+- 文件真实存在并不代表其内部职责已经得到验证；
+- `needs_confirmation` 文件仍需要后续源码读取确认；
+- 当前还没有完成 LangChain Repository Tools；
+- 当前还没有目标驱动 Tool Calling；
+- 当前还没有 LangGraph 自适应工作流；
+- 自动化测试正在补充，目前主要覆盖目标文件排序的基础行为；
+- 当前不进行全仓库代码理解、架构扫描或通用仓库问答。
 
 ## 当前演示效果
 
@@ -211,32 +230,34 @@ AI Agent 是一种能够感知环境、自主决策并采取行动以完成特�
 
 ```text
 repo-mentor/
+├── data/
+│   ├── demo_repo/
+│   └── evaluation/
+├── docs/
+│   ├── learning-log.md
+│   ├── product-positioning.md
+│   └── prompt-experiments.md
+├── evaluation/
+│   ├── roadmap_review.md
 ├── src/
 │   └── repo_mentor/
 │       ├── __init__.py
 │       ├── config.py
-│       └── main.py
-│       └── llm_service.py
-│       └── prompts.py
-│       └── model.py
-│       └── model_demo.py
-│       └── prompt_experiment.py
-│       └── roadmap_generator.py
-│       └── repository_service.py
-├── data/
-│   └── demo_repo/
-│       ├── user_profile.json
-│       ├── README.md
-│       └── tree.txt
-│       └── target_task.json
-├── docs/
-│   └── learning-log.md
-│   └── product-positioning.md
-│   └── prompt-experiments.md
+│       ├── llm_service.py
+│       ├── models.py
+│       ├── repository_service.py
+│       ├── repository_tree.py
+│       ├── repository_reader.py
+│       ├── repository_ranker.py
+│       ├── roadmap_generator.py
+│       └── ...
+├── tests/
+│   └── test_repository_ranker.py
+├── pytest.ini
 ├── .env.example
 ├── .gitignore
-├── requirements.txt
-└── README.md
+├── README.md
+└── requirements.txt
 ```
 
 各个核心文件的作用：
@@ -292,6 +313,17 @@ pip install -r requirements.txt
 ```bash
 python -m src.repo_mentor.config
 ```
+
+## Tests
+
+项目开始使用 `pytest` 对仓库证据层进行自动化验证。
+
+当前测试主要位于：
+
+```text
+tests/
+└── test_repository_ranker.py
+
 ## 下一步任务
 
 下一步将完成：
@@ -305,3 +337,33 @@ python -m src.repo_mentor.config
 ## 项目状态
 
 项目目前处于学习和持续开发阶段。
+
+## Engineering Principles
+
+RepoMentor 当前遵循以下原则：
+
+1. **真实路径优先**
+
+   推荐文件必须来自真实文件系统，
+   不允许模型凭空生成仓库路径。
+
+2. **证据和推断分离**
+
+   文件存在、README 引用和源码内容属于不同等级的证据，
+   未读取源码时不会声称已经理解文件内部实现。
+
+3. **确定性操作不用 LLM**
+
+   路径校验、文件存在判断、大小限制、
+   敏感文件过滤和基础规则排序优先使用普通 Python 实现。
+
+4. **目标相关性优先**
+
+   RepoMentor 关注的是
+   “为了当前学习或贡献目标最值得看的文件”，
+   而不是简单返回仓库中通用的重要文件。
+
+5. **逐步增加自动化测试**
+
+   使用 pytest 保存核心行为约束，
+   避免项目增长后只能依赖手工运行验证。

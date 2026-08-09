@@ -709,3 +709,216 @@ CONTRIBUTING、项目配置和docs入口，
 
 根据用户目标和仓库信息，
 为真实仓库中的文件建立相关性评分和证据模型。
+
+## 2026-08-09：目标相关文件排序与 pytest 基础测试
+
+### 今天的目标
+
+让 RepoMentor 不再只寻找“仓库中的重要文件”，
+而是根据当前目标任务，从真实仓库中寻找真正相关的文件，
+并为推荐结果保存可追溯的证据。
+
+同时开始为 RepoMentor 建立自动化测试，
+学习 pytest 的基本使用方式和 Python package 的导入机制。
+
+---
+
+### 今天完成
+
+- 定义 `RepositoryEvidence`，用于保存真实仓库证据；
+- 定义目标相关文件排序结果模型；
+- 实现目标关键词提取；
+- 建立中文目标词到英文路径关键词的映射；
+- 从真实文件系统中收集候选文件；
+- 根据目标关键词和文件路径计算相关性；
+- 根据 README 中的真实文件引用增加推荐证据；
+- 对入口文件、配置文件和测试文件增加辅助评分；
+- 输出 Top-N 目标相关文件；
+- 每个候选包含文件路径、分数、推荐理由和证据；
+- 对尚未读取源码内容的文件标记为 `needs_confirmation`；
+- 使用同一 RepoMentor 仓库的不同目标进行排序对照；
+- 创建 `tests/test_repository_ranker.py`；
+- 创建 `pytest.ini`；
+- 将 `src` 配置为 pytest 的 Python 模块搜索路径；
+- 将测试相关代码逐步改为标准 `repo_mentor` package 导入；
+- 成功使用 pytest 运行目标文件排序测试；
+- 当前 2 个测试通过。
+
+---
+
+### 今天理解的目标相关文件排序
+
+#### 1. “重要文件”不等于“目标相关文件”
+
+例如：
+
+`README.md`、`main.py` 可能是一个项目中的重要文件，
+
+但如果用户的目标是：
+
+“理解 RepoMentor 的目录树生成流程”
+
+那么：
+
+`repository_tree.py`
+
+和：
+
+`repository_service.py`
+
+通常应该比通用入口文件获得更高优先级。
+
+因此 RepoMentor 的排序目标不是：
+
+“找这个仓库最重要的文件”
+
+而是：
+
+“为了用户当前的具体学习目标，哪些文件最值得优先查看”。
+
+---
+
+#### 2. 候选文件必须来自真实文件系统
+
+不能让模型直接生成文件路径。
+
+正确的数据流应该是：
+
+真实仓库
+→ 实际扫描得到文件路径
+→ 根据目标计算相关性
+→ 排序
+→ 返回 Top-N
+
+这样可以从结构上减少模型推荐不存在文件的问题。
+
+---
+
+#### 3. 文件真实存在不代表已经知道文件内容
+
+例如：
+
+`src/repo_mentor/repository_tree.py`
+
+真实存在，只能证明：
+
+“这个路径存在”。
+
+如果还没有读取源码，就不能直接断言：
+
+“该文件中的某个函数使用了某种具体实现方式”。
+
+因此目前对普通源码候选使用：
+
+`needs_confirmation`
+
+表示：
+
+“路径和目标存在相关性，但具体源码职责仍需要读取真实内容后确认”。
+
+---
+
+#### 4. RepositoryEvidence 必须可以追溯
+
+证据不能只保存一句推荐理由，还需要记录：
+
+- `source_path`：证据来自哪个真实文件；
+- `snippet`：真实文件中的文本片段；
+- `reason`：为什么这条证据与目标相关；
+- `confidence`：这条证据规则本身的强弱。
+
+其中 `confidence` 表示的是：
+
+“这条推荐依据有多强”
+
+而不是：
+
+“模型觉得自己有多大概率是正确的”。
+
+---
+
+### 今天学习的 pytest
+
+#### 1. pytest 是什么
+
+pytest 是 Python 中常用的自动化测试框架。
+
+以前验证程序主要依靠：
+
+运行 Python 文件
+→ 看终端输出
+→ 人工判断结果是否正确
+
+使用 pytest 后，可以把预期行为写成代码：
+
+输入
+→ 调用被测试函数
+→ 使用 assert 检查结果
+→ 自动判断 PASS / FAIL
+
+例如：
+
+```python
+assert len(results) <= 3
+```
+
+### 遇到的问题：pytest无法导入项目模块
+
+首次运行`test_repository_ranker.py`时出现：
+
+`ModuleNotFoundError: No module named 'models'`
+
+原因是此前项目代码主要通过PyCharm直接运行单个Python文件，
+因此使用了：
+
+`from models import TargetTask`
+
+这种同目录脚本式导入。
+
+pytest从`tests/`目录收集测试时，
+`models.py`并不是顶层Python模块，
+真正的包路径应该是：
+
+`repo_mentor.models`
+
+解决方法：
+
+- 将`src`作为项目源码根目录；
+- 新增`pytest.ini`，配置`pythonpath = src`；
+- 测试代码改用`from repo_mentor.models import ...`；
+- 将repository模块之间的导入逐步改为标准包导入。
+
+这个问题让我理解了直接运行Python脚本与
+从Python package中导入模块的区别。
+
+### 当前 pytest 测试结果
+
+运行命令：
+
+```powershell
+& "D:\Anac\envs\agent\python.exe" -m pytest tests/test_repository_ranker.py -v
+```
+### 今日开发轨迹
+写目标排序器
+↓
+NameError
+↓
+理解函数作用域和定义
+
+开始写pytest
+↓
+ModuleNotFoundError
+↓
+理解脚本导入和package导入
+
+PowerShell运行pytest
+↓
+No module named pytest
+↓
+发现IDE解释器与终端Python不是同一环境
+
+显式使用agent环境
+↓
+pytest成功收集测试
+↓
+4 passed

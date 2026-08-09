@@ -33,7 +33,6 @@ EvidenceType = Literal[
     "docs",
 ]
 
-
 class StrictModel(BaseModel):
     """RepoMentor严格数据模型基类。"""
 
@@ -41,6 +40,54 @@ class StrictModel(BaseModel):
         extra="forbid",#不允许出现没定义的字段
         str_strip_whitespace=True,#允许一些特殊类型
     )
+
+class RepositoryEvidence(StrictModel):
+    """从真实仓库中获得的一条可追溯证据。"""
+
+    source_path: str = Field(
+        min_length=1,
+        description="证据来自哪个真实仓库文件",
+    )
+
+    snippet: str | None = Field(
+        default=None,
+        description="真实读取到的证据片段；没有内容证据时为空",
+    )
+
+    reason: str = Field(
+        min_length=1,
+        description="为什么这条证据与目标任务有关",
+    )
+
+    confidence: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="证据可信度",
+    )
+
+class RankedRepositoryFile(StrictModel):
+    """一个目标相关的仓库候选文件。"""
+
+    file_path: str = Field(
+        min_length=1,
+    )
+
+    score: float = Field(
+        ge=0.0,
+    )
+
+    reasons: list[str] = Field(
+        min_length=1,
+    )
+
+    evidence: list[RepositoryEvidence] = Field(
+        min_length=1,
+    )
+
+    content_status: Literal[
+        "verified",
+        "needs_confirmation",
+    ]
 
 
 class LearnerProfile(StrictModel):
