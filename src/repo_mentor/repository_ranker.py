@@ -112,39 +112,6 @@ TARGET_KEYWORD_MAP = {
     },
 }
 
-def extract_target_keywords(
-    target_task: TargetTask,
-) -> set[str]:
-    """从目标任务中提取用于路径匹配的关键词。"""
-
-    target_text = " ".join(
-        [
-            target_task.title,
-            target_task.description,
-            target_task.expected_outcome,
-        ]
-    ).lower()
-
-    keywords: set[str] = set()
-
-    # 提取目标中直接存在的英文词。
-    english_words = re.findall(
-        r"[a-zA-Z][a-zA-Z0-9_-]*",
-        target_text,
-    )
-
-    for word in english_words:
-        if len(word) >= 2:
-            keywords.add(word.lower())
-
-    # 将常见中文目标词映射为文件路径关键词。
-    for trigger, mapped_keywords in (
-        TARGET_KEYWORD_MAP.items()
-    ):
-        if trigger.lower() in target_text:
-            keywords.update(mapped_keywords)
-
-    return keywords
 
 def extract_target_keywords(
     target_task: TargetTask,
@@ -201,26 +168,6 @@ ONBOARDING_FILE_NAMES = {
     "contributing.md",
 }
 
-ENTRY_FILE_NAMES = {
-    "main.py",
-    "app.py",
-    "cli.py",
-    "__main__.py",
-}
-
-CONFIG_FILE_NAMES = {
-    "pyproject.toml",
-    "requirements.txt",
-    "setup.py",
-    "setup.cfg",
-    "config.py",
-}
-
-ONBOARDING_FILE_NAMES = {
-    "readme.md",
-    "readme.rst",
-    "contributing.md",
-}
 
 def is_test_file(
     relative_path: str,

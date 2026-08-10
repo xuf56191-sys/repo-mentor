@@ -57,95 +57,119 @@ class TreeBuildState:
     )
 
 #用set集合，in查询速度比列表list快很多。
-def should_ignore(path:Path,ignored_names:set[str],)->bool:
-    """判断目录文件是否应该被忽略"""
+def should_ignore(
+    path: Path,
+    ignored_names: set[str],
+) -> bool:
+    """判断文件或目录是否应该被扫描忽略。"""
+
     name = path.name
-    res = path.name in ignored_names
-    print(f"check {name}, ignore={res}")
-    return res
+
+    # .env.example 是公开模板，可以保留
+    if name == ".env.example":
+        return False
+
+    # 防止 .env、.env.local、.env.production 等进入扫描
+    if (
+        name == ".env"
+        or name.startswith(".env.")
+    ):
+        return True
+
+    return name in ignored_names
 
 def build_tree(
-        repository_path:str|Path,
-        *,
-        max_deepth:int = 4,
-        max_file:int = 200,
-        ignored_names:set[str] | None = None
-)->TreeBuildResult:
+    repository_path: str | Path,
+    *,
+    max_depth: int = 4,
+    max_files: int = 200,
+    ignored_names: set[str] | None = None,
+) -> TreeBuildResult:
     """
-        安全生成本地仓库目录树。
+    安全生成本地仓库目录树。
 
-        Args:
-            repository_path:
-                已存在的本地仓库路径。
-            max_depth:
-                最大递归深度。
-            max_files:
-                最多扫描的文件数量。
-            ignored_names:
-                需要忽略的文件或目录名称。
+    Args:
+        repository_path:
+            已存在的本地仓库路径。
+        max_depth:
+            最大递归深度。
+        max_files:
+            最多扫描的文件数量。
+        ignored_names:
+            需要忽略的文件或目录名称。
 
-        Returns:
-            TreeBuildResult。
-        """
-    if max_deepth < 1:
-        raise ValueError(f"max_deepth必须大于等于1")
+    Returns:
+        TreeBuildResult。
+    """
 
-    if max_file < 1:
-        raise ValueError(f"max_file必须大于等于1")
+    if max_depth < 1:
+        raise ValueError(
+            "max_depth必须大于等于1"
+        )
 
-    repository_info = validate_repository_path(repository_path)
+    if max_files < 1:
+        raise ValueError(
+            "max_files必须大于等于1"
+        )
+
+    repository_info = validate_repository_path(
+        repository_path
+    )
 
     if ignored_names is None:
-        ignored_names = set(DEFAULT_IGNORED_NAMES)
-    else :
-        ignored_names = set(ignored_names)
+        ignored_names = set(
+            DEFAULT_IGNORED_NAMES
+        )
+    else:
+        ignored_names = set(
+            ignored_names
+        )
 
     state = TreeBuildState()
 
-    lines = [f"{repository_info.name}/"]
+    lines = [
+        f"{repository_info.name}/"
+    ]
 
-
-    """
-    directory：要扫描的文件夹绝对路径
-    prefix：树形前缀字符串，比如 │ 、 、├── ，用来排版树的缩进，递归的时候不断拼接
-    current_depth：当前递归到第几层；current_depth=0 最开始根目录
-    """
     _walk_directory(
-        directory = repository_info.absolute_path,
-        prefix = " ",
-        current_deepth = 0,
-        max_deepth = max_deepth,
-        max_file = max_file,
+        directory=repository_info.absolute_path,
+        prefix="",
+        current_depth=0,
+        max_depth=max_depth,
+        max_files=max_files,
         ignored_names=ignored_names,
         state=state,
         lines=lines,
     )
+
     return TreeBuildResult(
         tree="\n".join(lines),
         file_count=state.file_count,
-        directory_count = state.directory_count,
-        truncated = state.truncated,
-        warnings = state.warnings,
+        directory_count=state.directory_count,
+        truncated=state.truncated,
+        warnings=state.warnings,
     )
 
 def _walk_directory(
     *,
     directory: Path,
     prefix: str,
-    current_deepth: int,
-    max_deepth: int,
-    max_file: int,
+    current_depth: int,
+    max_depth: int,
+    max_files: int,
     ignored_names: set[str],
     state: TreeBuildState,
     lines: list[str],
 ) -> None:
     """递归遍历目录并生成树形结构。"""
 
-    if current_deepth >= max_deepth:
+    if current_depth >= max_depth:
         return
 
     try:
-        children = list(directory.iterdir())
+        children = list(
+            directory.iterdir()
+        )
     except PermissionError:
         state.warnings.append(
             f"没有权限读取目录：{directory}"
@@ -167,7 +191,7 @@ def _walk_directory(
         )
     ]
 
-    # 目录排在前面，同类型按名称排序。
+    # 目录优先，同类型按名称排序
     visible_children.sort(
         key=lambda path: (
             not path.is_dir(),
@@ -182,7 +206,8 @@ def _walk_directory(
             return
 
         is_last = (
-            index == len(visible_children) - 1
+            index
+            == len(visible_children) - 1
         )
 
         branch = (
@@ -200,12 +225,13 @@ def _walk_directory(
             )
         )
 
-        # 不跟随符号链接。
+        # 不跟随符号链接
         if child.is_symlink():
             lines.append(
                 f"{prefix}{branch}"
                 f"{child.name} [symlink]"
             )
+
             state.warnings.append(
                 f"跳过符号链接：{child}"
             )
@@ -221,21 +247,22 @@ def _walk_directory(
                 )
 
                 if (
-                    current_deepth + 1
-                    < max_deepth
+                    current_depth + 1
+                    < max_depth
                 ):
                     _walk_directory(
                         directory=child,
                         prefix=child_prefix,
-                        current_deepth=(
-                            current_deepth + 1
+                        current_depth=(
+                            current_depth + 1
                         ),
-                        max_deepth=max_deepth,
-                        max_file=max_file,
+                        max_depth=max_depth,
+                        max_files=max_files,
                         ignored_names=ignored_names,
                         state=state,
                         lines=lines,
                     )
+
                 else:
                     lines.append(
                         f"{child_prefix}"
@@ -245,7 +272,7 @@ def _walk_directory(
             elif child.is_file():
                 if (
                     state.file_count
-                    >= max_file
+                    >= max_files
                 ):
                     lines.append(
                         f"{prefix}"
@@ -256,8 +283,10 @@ def _walk_directory(
 
                     state.warnings.append(
                         "目录树已截断："
-                        f"文件数量达到{max_file}。"
+                        f"文件数量达到"
+                        f"{max_files}。"
                     )
+
                     return
 
                 state.file_count += 1
@@ -310,8 +339,8 @@ def main() -> None:
     try:
         result = build_tree(
             PROJECT_ROOT,
-            max_deepth=4,
-            max_file=200,
+            max_depth=4,
+            max_files=200,
         )
 
         print_tree_result(result)

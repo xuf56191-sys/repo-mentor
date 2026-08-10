@@ -106,11 +106,21 @@ RepoMentor 当前已经完成 V0.2 个性化路线原型，
 - 输出带有分数、理由和 `RepositoryEvidence` 的 Top-N 候选文件；
 - 区分“真实路径已经确认”和“源码内容仍待确认”；
 - 开始使用 pytest 为仓库证据层增加自动化测试。
+- 将真实仓库证据能力封装为 LangChain Tools；
+- 提供 `get_repo_tree` 获取受限目录树；
+- 提供 `get_onboarding_docs` 读取仓库入门和贡献资料；
+- 提供 `read_repo_file` 受控读取单个真实仓库文件；
+- 提供 `rank_target_files` 根据目标排序真实候选文件；
+- 每个 Tool 使用明确的输入 Schema、docstring 和结构化返回值；
+- Tool 执行错误能够返回可读的结构化错误；
+- `read_repo_file` 拒绝读取 `.env` 等被忽略或敏感路径；
+- 开始使用 pytest 验证 Repository Tools 的独立调用行为。
 
 当前正在完成：
-- 将仓库目录树、入门资料读取、单文件读取和目标文件排序封装为Tools；
-- 让模型根据目标任务选择合适的仓库工具；
-- 为Tool Calling增加日志、范围限制和异常保护。
+- 让模型根据具体目标自主选择 Repository Tools；
+- 记录模型产生的 tool calls、参数和调用次数；
+- 将 Tool 结果通过 ToolMessage 返回模型；
+- 限制模型无目的地读取大量无关仓库文件。
 
 当前还没有完成：
 

@@ -922,3 +922,133 @@ No module named pytest
 pytest成功收集测试
 ↓
 4 passed
+
+## 2026-08-10：仓库证据 Tools 封装
+
+### 今天的目标
+
+将此前实现的仓库路径校验、目录树、
+入门资料读取、单文件读取和目标文件排序能力，
+封装为具有明确输入 Schema 和调用说明的 LangChain Tools。
+
+### 今天完成
+
+- 创建 `repository_tools.py`；
+- 学习 LangChain Tool 与普通 Python 函数的区别；
+- 定义 `get_repo_tree`；
+- 定义 `get_onboarding_docs`；
+- 定义 `read_repo_file`；
+- 定义 `rank_target_files`；
+- 为每个 Tool 定义输入 Pydantic Schema；
+- 为每个 Tool 编写明确 docstring；
+- 使用结构化 dict 返回 Tool 结果；
+- 区分 Schema 参数错误和业务执行错误；
+- 对 `read_repo_file` 增加敏感路径保护；
+- 创建统一 `REPOSITORY_TOOLS` 列表；
+- 使用 `.invoke()` 独立测试每个 Tool；
+- 使用 pytest 增加 Repository Tool 测试。
+
+### 今天理解的内容
+
+#### 1. Tool 不是重新实现业务逻辑
+
+Tool 层负责向模型暴露能力，
+真正的仓库逻辑仍由已有的
+`repository_tree`、`repository_reader`
+和 `repository_ranker` 完成。
+
+#### 2. Tool 的 name、description 和 Schema 是模型的使用说明
+
+模型以后并不是直接阅读 Python 实现判断怎么调用，
+而是主要根据 Tool 的名称、说明和参数结构决定使用哪个工具。
+
+因此 Tool 描述不仅要说明“它能做什么”，
+还应该说明“什么时候应该用”和“什么时候不应该用”。
+
+#### 3. `.invoke()` 可以在没有 LLM 的情况下测试 Tool
+
+今天还没有让模型调用 Tool。
+
+先通过：
+
+`tool.invoke({...})`
+
+单独验证每个 Tool 的输入、执行和输出，
+可以把 Tool 本身的问题与模型 Tool Calling 的问题分开。
+
+#### 4. Schema 错误和执行错误不同
+
+例如 `max_depth=0`
+属于参数 Schema 不合法，
+应该在真正执行 Tool 前被 Pydantic 拒绝。
+
+而不存在的仓库路径属于参数格式合法、
+但业务执行失败，应返回受控错误信息。
+
+#### 5. Tool 应优先复用确定性 Python 能力
+
+目录扫描、文件读取、路径检查和目标相关性规则
+已经有确定性 Python 实现，
+不应该为了使用 Agent 而重新交给 LLM 完成。
+
+### 测试结果
+
+填写实际结果：
+
+- `test_repository_ranker.py`：
+- `test_repository_tools.py`：
+========================================================================= test session starts =========================================================================
+```platform win32 -- Python 3.11.15, pytest-9.1.1, pluggy-1.6.0 -- D:\Anac\envs\agent\python.exe
+cachedir: .pytest_cache
+rootdir: D:\PPT文档\agent初学代码\repo-mentor
+configfile: pytest.ini
+plugins: anyio-4.14.2, langsmith-0.10.12
+collected 1 item                                                                                                                                                        
+
+tests/test_repository_tools.py::test_get_repo_tree_can_invoke PASSED                                                                                             [100%] 
+
+========================================================================== warnings summary =========================================================================== 
+src\repo_mentor\repository_tools.py:4
+  D:\PPT文档\agent初学代码\repo-mentor\src\repo_mentor\repository_tools.py:4: DeprecationWarning: 'msilib' is deprecated and slated for removal in Python 3.13
+    from msilib.schema import Class
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+==================================================================== 1 passed, 1 warning in 0.61s ===================================================================== 
+PS D:\PPT文档\agent初学代码\repo-mentor> & "D:\Anac\envs\agent\python.exe" -m pytest tests/test_repository_tools.py -v
+========================================================================= test session starts =========================================================================
+platform win32 -- Python 3.11.15, pytest-9.1.1, pluggy-1.6.0 -- D:\Anac\envs\agent\python.exe
+cachedir: .pytest_cache
+rootdir: D:\PPT文档\agent初学代码\repo-mentor
+configfile: pytest.ini
+plugins: anyio-4.14.2, langsmith-0.10.12
+collected 6 items                                                                                                                                                       
+
+tests/test_repository_tools.py::test_get_repo_tree_can_invoke PASSED                                                                                             [ 16%] 
+tests/test_repository_tools.py::test_get_onboarding_docs_can_invoke PASSED                                                                                       [ 33%] 
+tests/test_repository_tools.py::test_read_repo_file_can_invoke PASSED                                                                                            [ 50%] 
+tests/test_repository_tools.py::test_rank_target_files_can_invoke PASSED                                                                                         [ 66%] 
+tests/test_repository_tools.py::test_invalid_tool_argument_is_rejected PASSED                                                                                    [ 83%] 
+tests/test_repository_tools.py::test_read_repo_file_rejects_env PASSED                                                                                           [100%] 
+
+========================================================================== warnings summary =========================================================================== 
+src\repo_mentor\repository_tools.py:4
+  D:\PPT文档\agent初学代码\repo-mentor\src\repo_mentor\repository_tools.py:4: DeprecationWarning: 'msilib' is deprecated and slated for removal in Python 3.13
+    from msilib.schema import Class
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+==================================================================== 6 passed, 1 warning in 0.69s ===================================================================== 
+PS D:\PPT文档\agent初学代码\repo-mentor>
+```
+
+- 总测试数量：6
+- 通过数量：6
+
+### 遇到的问题
+
+填写今天真实出现的问题，不提前编写结论。
+
+### 下一步
+
+让模型绑定 `REPOSITORY_TOOLS`，
+根据具体学习目标产生 tool calls，
+执行工具并将 ToolMessage 返回模型。
