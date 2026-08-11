@@ -1052,3 +1052,136 @@ PS D:\PPT文档\agent初学代码\repo-mentor>
 让模型绑定 `REPOSITORY_TOOLS`，
 根据具体学习目标产生 tool calls，
 执行工具并将 ToolMessage 返回模型。
+
+### 草稿
+
+昨天已经有：
+
+```
+REPOSITORY_TOOLS = [
+    get_repo_tree,
+    get_onboarding_docs,
+    read_repo_file,
+    rank_target_files,
+]
+```
+现在假设：
+```
+
+llm = create_llm(...)
+llm_with_tools = llm.bind_tools(REPOSITORY_TOOLS)
+
+```
+问题：
+第一题：
+① bind_tools() 会不会立即执行这四个 Tool？
+② 调用 llm_with_tools.invoke(...) 后，是 Python 在选择工具，还是模型在选择工具？
+③ 如果模型决定调用 rank_target_files，它会直接拿到工具执行结果吗？
+④ llm 和 llm_with_tools 的区别是什么？
+
+答案：
+①不会
+②模型在选择工具
+③不会
+④llm_with_tools 是 “配备了工具说明书” 的模型，而 llm 是“赤手空拳”的模型。说明书（工具定义）让模型学会了“如何请求外部能力”，但真正的“伸手去做（执行）”仍需你编写代码实现。
+
+第二题：
+
+一条 tool_call 最重要的三个字段是什么？为什么除了 name 和 args 之外，还必须有 id？
+- id（唯一调用标识符）
+- name（要调用的工具名称）
+- args（传递给工具的参数）
+- name 和 args 解决的是 “做什么” 和 “怎么做” 的问题（语义和逻辑）。
+- id 解决的是 “这次请求是谁发的” 和 “结果要回传给谁” 的问题（上下文追踪）。
+思考题
+假设：
+模型同时调用：
+get_repo_tree
+get_onboarding_docs
+如果没有：
+tool_call_id 模型后来收到两个 Tool 结果时，怎么知道哪个结果属于哪个请求？
+
+| 实验 | 目标 | 实际 Tool Calls                                                                         | 调用数 | 是否合理 |
+| :--- | :--- |:--------------------------------------------------------------------------------------|----:|:-----|
+| A | 只看目录 | `get_repo_tree`                                                                       |   1 | 合理   |
+| B | 项目介绍/依赖/贡献 | `get_onboarding_docs → get_repo_tree`                                                 |   2 | 合理   |
+| C | 理解目录树扫描流程 | `get_repo_tree → rank_target_files → 2×read_repo_file`                                |   4 | 合理   |
+| D | 已知 README，只读取 | `read_repo_file`                                                                                      |   1 | 合理   |
+
+## 2026-08-11：目标驱动 Tool Calling
+
+### 今天的目标
+
+让 RepoMentor 不再由 Python 代码提前决定调用哪个仓库工具，
+而是把 Repository Tools 提供给模型，
+让模型根据用户当前的具体学习或贡献目标
+自主判断是否需要工具以及应该使用哪个工具。
+
+同时实现一个最小、有限轮次的 Tool Calling 循环，
+把真实工具执行结果重新返回模型，
+使模型能够根据新获得的仓库证据继续决策。
+
+---
+
+### 今天完成
+
+- 创建 `target_tool_calling.py`；
+- 将四个 Repository Tools 绑定给 LLM；
+- 理解 `bind_tools()` 与真正 Tool 执行之间的区别；
+- 学习并观察 `AIMessage.tool_calls`；
+- 理解 Tool Call 中 `name`、`args` 和 `id` 的作用；
+- 创建 Tool 名称到 Tool 对象的注册表；
+- 根据模型提供的 `name` 查找真实 Tool；
+- 根据模型提供的 `args` 执行 Tool；
+- 将 Tool 返回结果序列化为可传递给模型的内容；
+- 使用 `ToolMessage` 将工具结果重新放回消息历史；
+- 保证 `ToolMessage.tool_call_id`
+  与对应 `AIMessage.tool_calls[].id` 一致；
+- 支持同一次模型响应产生多个 Tool Call；
+- 实现最多两轮的 Tool Calling 循环；
+- 记录 Tool 名称、参数、调用 ID、轮次和总调用次数；
+- 达到最大 Tool Calling 轮次后，
+  使用不绑定工具的模型进行最终总结；
+- 增加强制总结指令，
+  防止模型在已经禁止工具调用时继续模拟 Tool Call；
+- 使用多个不同目标测试模型的工具选择行为；
+- 为 Tool 注册表和 ToolMessage 执行流程增加 pytest 测试；
+- 修复项目内部剩余的 Python package 导入问题；
+- 当前相关 pytest 测试均已通过。
+
+---
+
+### 今天理解的核心流程
+
+RepoMentor 当前的最小 Tool Calling 流程为：
+
+```text
+SystemMessage + HumanMessage
+↓
+llm.bind_tools(REPOSITORY_TOOLS)
+↓
+llm_with_tools.invoke(messages)
+↓
+AIMessage
+↓
+检查 AIMessage.tool_calls
+↓
+根据 tool_call["name"] 找到 Tool
+↓
+使用 tool_call["args"] 执行 Tool
+↓
+获得真实 Tool 结果
+↓
+创建 ToolMessage
+↓
+tool_call["id"]
+=
+ToolMessage.tool_call_id
+↓
+将 ToolMessage 加入 messages
+↓
+再次调用模型
+↓
+继续调用 Tool 或生成最终回答
+
+

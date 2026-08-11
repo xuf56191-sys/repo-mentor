@@ -70,9 +70,9 @@ class ReadRepoFileInput(ToolInputModel):
     )
     relative_path:str = Field(
         min_length=1,
-        description=("相对于仓库根目录的真实文件路径，"
+        description="相对于仓库根目录的真实文件路径，"
                     "例如 src/repo_mentor/models.py。",
-        ),
+
     )
 
 class RankTargetFilesInput(ToolInputModel):

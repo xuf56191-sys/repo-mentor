@@ -1,7 +1,7 @@
 """Deepseek 大模型调用服务"""
 
 from langchain_deepseek import ChatDeepSeek
-from config import ConfigError , load_settings
+from repo_mentor.config import ConfigError , load_settings
 
 
 def create_llm(

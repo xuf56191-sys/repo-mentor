@@ -116,6 +116,37 @@ RepoMentor 当前已经完成 V0.2 个性化路线原型，
 - `read_repo_file` 拒绝读取 `.env` 等被忽略或敏感路径；
 - 开始使用 pytest 验证 Repository Tools 的独立调用行为。
 
+
+
+## Target-Driven Evidence Collection
+
+RepoMentor 的目标不是尽可能读取更多仓库文件，
+而是根据用户当前目标选择必要证据。
+
+例如，当目标是：
+
+> 理解 RepoMentor 的目录树扫描流程
+
+模型实际可以形成如下证据收集过程：
+
+```text
+目标
+↓
+get_repo_tree
+确认真实仓库结构
+↓
+rank_target_files
+确定与目标最相关的文件
+↓
+read_repo_file
+读取 repository_tree.py
+↓
+read_repo_file
+读取 repository_service.py
+↓
+根据真实源码总结目录树扫描流程
+```
+
 当前正在完成：
 - 让模型根据具体目标自主选择 Repository Tools；
 - 记录模型产生的 tool calls、参数和调用次数；
@@ -168,21 +199,22 @@ RepoMentor 会将其标记为：
 
 ## 当前限制
 
-当前项目仍处于开发阶段。
+当前项目仍处于 V0.4 仓库证据层开发阶段。
 
-目前的主要限制包括：
+主要限制包括：
 
 - 目标相关文件排序仍主要依赖规则和路径关键词；
-- 中文目标词到英文路径关键词的映射需要继续扩展；
-- 当前只读取 README、CONTRIBUTING、项目配置和少量 docs 入口；
-- 普通源码文件尚未进入受控读取和证据提取流程；
-- 文件真实存在并不代表其内部职责已经得到验证；
-- `needs_confirmation` 文件仍需要后续源码读取确认；
-- 当前还没有完成 LangChain Repository Tools；
-- 当前还没有目标驱动 Tool Calling；
-- 当前还没有 LangGraph 自适应工作流；
-- 自动化测试正在补充，目前主要覆盖目标文件排序的基础行为；
-- 当前不进行全仓库代码理解、架构扫描或通用仓库问答。
+- 普通源码只有在目标驱动 Tool Calling 明确选择后才会读取；
+- 当前 Tool Calling 使用手写有限循环，
+  尚未迁移到 LangGraph；
+- 当前只限制 Tool Calling 轮数，
+  尚未加入完整的文件读取预算和 Token / 字符预算；
+- 尚未实现完善的 Tool 失败重试和调用耗时统计；
+- Tool description 和系统提示词仍需要通过更多目标实验继续优化；
+- 当前模型可能选择“合理但非必要”的额外 Tool，
+  因此后续需要进一步优化工具选择效率；
+- 当前不进行全仓库源码批量读取；
+- 当前不自动修改代码、不自动创建 PR。
 
 ## 当前演示效果
 
@@ -204,11 +236,33 @@ AI Agent 是一种能够感知环境、自主决策并采取行动以完成特�
 
 当前测试说明：
 
-- 模型配置可以正常读取；
-- API Key 不会直接打印到终端；
-- 模型能够连续调用；
-- 空 Prompt 会被程序拒绝；
-- 模型调用失败时会显示错误提示。
+## Tests
+
+项目使用 `pytest` 验证仓库证据层和 Tool Calling 的核心行为。
+
+当前测试覆盖：
+
+- 不同目标产生不同的目标文件排序；
+- `top_n` 限制候选文件数量；
+- Repository Tools 可以独立 `.invoke()`；
+- README、目录树、单文件读取和目标排序 Tool 能够正常执行；
+- Tool 输入 Schema 能拒绝非法参数；
+- 敏感文件读取能够被限制；
+- Tool 注册表能够正确维护四个 Repository Tools；
+- `execute_tool_call()` 能根据模型提供的工具名称和参数执行真实 Tool；
+- Tool 执行结果能够转换为 `ToolMessage`；
+- `ToolMessage.tool_call_id` 与原始 Tool Call ID 保持一致。
+
+运行全部测试：
+
+```bash
+python -m pytest -v
+```
+运行 Tool Calling 测试：
+
+```bash
+python -m pytest tests/test_target_tool_calling.py -v
+```
 
 
 ## 后续计划
@@ -253,16 +307,24 @@ repo-mentor/
 │   └── repo_mentor/
 │       ├── __init__.py
 │       ├── config.py
+│       └── evaluation.py
 │       ├── llm_service.py
+│       └── main.py
 │       ├── models.py
+│       └── model_demo.py
+│       └── prompt_experiment.py
+│       └── prompts.py
 │       ├── repository_service.py
 │       ├── repository_tree.py
 │       ├── repository_reader.py
+│       ├── repository_tools.py
 │       ├── repository_ranker.py
 │       ├── roadmap_generator.py
-│       └── ...
+│       └── target_tool_calling.py
 ├── tests/
 │   └── test_repository_ranker.py
+│   └── test_target_tool_calling.py
+│   └── test_repository_tools.py
 ├── pytest.ini
 ├── .env.example
 ├── .gitignore
