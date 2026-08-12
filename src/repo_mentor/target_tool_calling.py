@@ -3,8 +3,17 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 from pathlib import Path
+
+from repo_mentor.repository_safeguards import (
+    EvidenceBudget,
+    calculate_evidence_cost,
+    invoke_with_retry,
+    redact_for_log,
+    summarize_tool_result,
+)
 
 from langchain.messages import (
     HumanMessage,
@@ -72,6 +81,8 @@ def build_messages(
         human_message,
     ]
 
+logger = logging.getLogger(__name__)
+
 def request_tool_decision(
     messages,
 ):
@@ -85,25 +96,214 @@ def request_tool_decision(
 
 def execute_tool_call(
     tool_call: dict[str, Any],
+    budget: EvidenceBudget,
 ) -> ToolMessage:
-    """执行一个模型请求的 Repository Tool。"""
+    """
+    受控执行一个模型请求的 Repository Tool。
+    """
 
     tool_name = tool_call["name"]
     tool_args = tool_call["args"]
     tool_id = tool_call["id"]
 
-    repository_tool = TOOLS_BY_NAME.get(
-        tool_name
+    repository_tool = (
+        TOOLS_BY_NAME.get(tool_name)
     )
+
+    # ----------------------------------
+    # 1. 模型请求了不存在的Tool
+    # ----------------------------------
 
     if repository_tool is None:
-        raise ValueError(
-            f"未发现工具：{tool_name}"
+        result = {
+            "ok": False,
+            "error_type": "UnknownTool",
+            "message": (
+                f"不存在Repository Tool："
+                f"{tool_name}"
+            ),
+        }
+
+        return ToolMessage(
+            content=json.dumps(
+                result,
+                ensure_ascii=False,
+            ),
+            tool_call_id=tool_id,
+            name=tool_name,
         )
 
-    tool_result = repository_tool.invoke(
-        tool_args
+    # ----------------------------------
+    # 2. 预算已经停止
+    #    后续读取类Tool不再真正执行
+    # ----------------------------------
+
+    if (
+        budget.stopped
+        and tool_name
+        in {
+            "read_repo_file",
+            "get_onboarding_docs",
+        }
+    ):
+        result = {
+            "ok": False,
+            "error_type": (
+                "BudgetExceeded"
+            ),
+            "message": (
+                budget.stop_reason
+                or "证据读取预算已耗尽"
+            ),
+        }
+
+        logger.warning(
+            "tool_blocked_by_budget "
+            "name=%s reason=%s",
+            tool_name,
+            budget.stop_reason,
+        )
+
+        return ToolMessage(
+            content=json.dumps(
+                result,
+                ensure_ascii=False,
+            ),
+            tool_call_id=tool_id,
+            name=tool_name,
+        )
+
+    # ----------------------------------
+    # 3. 安全日志
+    # ----------------------------------
+
+    logger.info(
+        "tool_start name=%s",
+        tool_name,
     )
+
+    logger.debug(
+        "tool_args name=%s args=%s",
+        tool_name,
+        redact_for_log(tool_args),
+    )
+
+    # ----------------------------------
+    # 4. 带计时和重试执行
+    # ----------------------------------
+
+    execution = invoke_with_retry(
+        repository_tool,
+        tool_args,
+        max_retries=1,
+    )
+
+    tool_result = execution.result
+
+    # ----------------------------------
+    # 5. 只记录结果摘要
+    # ----------------------------------
+
+    summary = summarize_tool_result(
+        tool_name,
+        tool_result,
+    )
+
+    logger.info(
+        "tool_end "
+        "name=%s "
+        "elapsed=%.3fs "
+        "attempts=%d "
+        "summary=%s",
+        tool_name,
+        execution.elapsed_seconds,
+        execution.attempts,
+        redact_for_log(summary),
+    )
+
+    # ----------------------------------
+    # 6. 计算本次证据预算
+    # ----------------------------------
+
+    file_count, char_count = (
+        calculate_evidence_cost(
+            tool_name,
+            tool_result,
+        )
+    )
+
+    if (
+        file_count > 0
+        or char_count > 0
+    ):
+        # 本次结果如果放进模型，
+        # 是否会突破预算？
+        if not budget.can_consume(
+            file_count,
+            char_count,
+        ):
+            # consume负责记录停止原因
+            budget.consume(
+                file_count,
+                char_count,
+            )
+
+            logger.warning(
+                "budget_exceeded "
+                "name=%s "
+                "used_files=%d/%d "
+                "used_chars=%d/%d "
+                "reason=%s",
+                tool_name,
+                budget.used_files,
+                budget.max_files,
+                budget.used_chars,
+                budget.max_chars,
+                budget.stop_reason,
+            )
+
+            # 注意：
+            # 原始Tool已经执行，
+            # 但大结果不再塞进模型上下文。
+            budget_result = {
+                "ok": False,
+                "error_type": (
+                    "BudgetExceeded"
+                ),
+                "message": (
+                    budget.stop_reason
+                    or "证据读取预算已超限"
+                ),
+            }
+
+            return ToolMessage(
+                content=json.dumps(
+                    budget_result,
+                    ensure_ascii=False,
+                ),
+                tool_call_id=tool_id,
+                name=tool_name,
+            )
+
+        # 预算允许，正式消费
+        budget.consume(
+            file_count,
+            char_count,
+        )
+
+        logger.info(
+            "budget_consumed "
+            "files=%d/%d "
+            "chars=%d/%d",
+            budget.used_files,
+            budget.max_files,
+            budget.used_chars,
+            budget.max_chars,
+        )
+
+    # ----------------------------------
+    # 7. 正常返回ToolMessage
+    # ----------------------------------
 
     tool_content = json.dumps(
         tool_result,
@@ -118,16 +318,20 @@ def execute_tool_call(
         name=tool_name,
     )
 
-
-
-
 def run_target_tool_calling(
     repository_path: str,
     target_task: TargetTask,
     *,
     max_rounds: int = 2,
+    max_evidence_files: int = 4,
+    max_evidence_chars: int = 30_000,
 ):
     """运行有限轮次的目标驱动 Tool Calling。"""
+
+    budget = EvidenceBudget(
+        max_files=max_evidence_files,
+        max_chars=max_evidence_chars,
+    )
 
     if max_rounds < 1:
         raise ValueError(
@@ -244,16 +448,23 @@ def run_target_tool_calling(
             )
 
             # 8. 真正执行模型请求的Tool
-            tool_message = (
-                execute_tool_call(
-                    tool_call
-                )
+            tool_message = execute_tool_call(
+                tool_call,
+                budget,
             )
 
             # 9. 把Tool执行结果放回消息历史
             messages.append(
                 tool_message
             )
+        if budget.stopped:
+            logger.warning(
+                "tool_calling_stopped "
+                "reason=%s",
+                budget.stop_reason,
+            )
+
+            break
 
             print(
                 "\nTool 执行完成"
@@ -325,7 +536,20 @@ def run_target_tool_calling(
         "rounds": max_rounds,
     }
 
+def configure_logging(
+    level: int = logging.INFO,
+) -> None:
+    """配置 RepoMentor 运行日志。"""
 
+    logging.basicConfig(
+        level=level,
+        format=(
+            "%(asctime)s | "
+            "%(levelname)s | "
+            "%(name)s | "
+            "%(message)s"
+        ),
+    )
 
 
 PROJECT_ROOT = (
@@ -384,7 +608,8 @@ def main() -> None:
     #     ),
     #     reference=None,
     # )
-
+    configure_logging(
+        logging.INFO)
     #D
     target_task = TargetTask(
         title="读取已经确认存在的 README.md",

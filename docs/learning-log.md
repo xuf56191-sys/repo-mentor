@@ -1184,4 +1184,672 @@ ToolMessage.tool_call_id
 ↓
 继续调用 Tool 或生成最终回答
 
+## 2026-08-12：日志、错误与范围限制
+
+### 今天的目标
+
+在已经能够完成目标驱动 Tool Calling 的基础上，为 Repository Tools 增加工程化保护。
+
+目标不是继续增加更多 Tool，而是控制已有 Tool：
+
+* 执行了什么；
+* 执行了多久；
+* 是否失败；
+* 是否值得重试；
+* 允许读取多少仓库证据；
+* 日志中是否可能泄露敏感信息。
+
+---
+
+### 今天完成
+
+* 新增 `repository_safeguards.py`；
+* 使用标准 `logging` 记录 Tool 执行状态；
+* 学习并区分 DEBUG、INFO、WARNING、ERROR 日志级别；
+* 实现 `redact_for_log()` 对日志参数进行递归脱敏；
+* 支持嵌套 dict、list、tuple 中敏感字段的保护；
+* 定义 `EvidenceBudget`；
+* 同时限制进入模型上下文的文件数量和字符数量；
+* 保存 `used_files`、`used_chars`、`stopped` 和 `stop_reason`；
+* 实现 Tool 执行耗时统计；
+* 区分可重试错误和不可重试错误；
+* 暂时性失败最多额外重试一次；
+* 最终 Tool 失败转换为结构化错误，不直接使整个 Agent 崩溃；
+* 日志只记录 Tool 结果摘要，不打印完整仓库源码；
+* 将 safeguards 接入目标驱动 Tool Calling；
+* 证据预算耗尽后阻止后续文件读取；
+* 即使 Tool 因预算被拒绝，仍返回与原 Tool Call ID 对应的 `ToolMessage`；
+* 使用 pytest 验证日志脱敏、预算、重试和 Tool Calling 相关行为；
+* 全量自动化测试通过。
+
+---
+
+### 1. 日志和 print 的区别
+
+以前项目中很多调试主要通过：
+
+```python
+print(...)
+```
+
+观察程序行为。
+
+随着 Tool Calling 流程变长，需要区分不同严重程度的信息，因此开始使用 Python `logging`。
+
+目前理解为：
+
+```text
+DEBUG
+→ 开发调试细节，例如脱敏后的 Tool 参数
+
+INFO
+→ 正常生命周期，例如 Tool 开始、完成、耗时
+
+WARNING
+→ 出现异常情况，但程序仍然能够继续，例如准备重试或预算耗尽
+
+ERROR
+→ 某项操作最终失败
+```
+
+日志的目的不是打印所有数据，而是帮助定位：
+
+```text
+哪个Tool
+什么时候执行
+是否成功
+用了多久
+尝试几次
+为什么停止
+```
+
+---
+
+### 2. Tool 计时不等于强制超时
+
+使用：
+
+```python
+time.perf_counter()
+```
+
+记录：
+
+```text
+Tool开始时间
+↓
+Tool执行
+↓
+Tool结束时间
+↓
+计算elapsed_seconds
+```
+
+可以知道 Tool 实际执行了多长时间。
+
+但这只是：
+
+```text
+计时
+```
+
+不是：
+
+```text
+强制超时
+```
+
+如果一个 Tool 实际执行 8 秒，
+`perf_counter()` 只能在它结束后告诉程序：
+
+```text
+运行了8秒
+```
+
+不会在第3秒自动终止 Tool。
+
+因此当前版本记录执行耗时，
+真正的强制超时机制留给后续进一步实现。
+
+---
+
+### 3. 重试不是“失败就再跑一次”
+
+今天开始区分：
+
+```text
+暂时性失败
+```
+
+和：
+
+```text
+确定性失败
+```
+
+例如：
+
+```text
+TimeoutError
+ConnectionError
+部分临时 OSError
+```
+
+下一次执行可能成功，因此可以最多重试一次。
+
+但是：
+
+```text
+ValueError
+参数Schema错误
+路径本身不存在
+敏感文件访问被拒绝
+预算已经耗尽
+```
+
+使用相同参数重新执行通常不会改变结果，因此不应该进行无意义重试。
+
+当前：
+
+```text
+max_retries = 1
+```
+
+含义是：
+
+```text
+第一次正常执行
++
+最多额外重试1次
+
+最多执行2次
+```
+
+而不是总共只执行一次。
+
+---
+
+### 4. 日志脱敏
+
+新增：
+
+```python
+redact_for_log()
+```
+
+用于在 Tool 参数进入日志之前隐藏敏感字段。
+
+例如原始数据：
+
+```text
+MODEL_API_KEY = sk-xxxx
+password = 123456
+```
+
+日志中的安全副本应变成：
+
+```text
+MODEL_API_KEY = ***REDACTED***
+password = ***REDACTED***
+```
+
+当前匹配的敏感语义包括：
+
+* api_key
+* apikey
+* token
+* password
+* secret
+* authorization
+
+判断使用“字段名包含敏感关键词”，而不仅仅是完全相等。
+
+原因是实际配置字段可能是：
+
+```text
+MODEL_API_KEY
+OPENAI_API_KEY
+ACCESS_TOKEN
+```
+
+这些名称不会与 `api_key` 或 `token` 完全相等，但仍然属于敏感字段。
+
+---
+
+### 5. 为什么日志脱敏返回新对象
+
+`redact_for_log()` 不应该直接修改真正的 `tool_args`。
+
+正确关系是：
+
+```text
+真实 tool_args
+├── Tool执行
+│   └── 保留真实参数
+│
+└── logging
+    ↓
+redact_for_log()
+    ↓
+只记录脱敏后的副本
+```
+
+否则如果直接把：
+
+```text
+api_key
+```
+
+替换成：
+
+```text
+***REDACTED***
+```
+
+真正执行 Tool 时也会失去需要的真实参数。
+
+因此：
+
+```text
+业务数据
+```
+
+和：
+
+```text
+日志展示数据
+```
+
+需要分离。
+
+---
+
+### 6. EvidenceBudget
+
+今天新增确定性的证据读取预算。
+
+主要字段：
+
+```text
+max_files
+max_chars
+
+used_files
+used_chars
+
+stopped
+stop_reason
+```
+
+预算判断不是针对单次请求，而是累计计算：
+
+```text
+used_files + 本次file_count
+used_chars + 本次char_count
+```
+
+如果任何一项超过限制，本次证据不会继续进入模型上下文。
+
+例如：
+
+```text
+max_chars = 10000
+used_chars = 8000
+本次结果 = 5000 chars
+```
+
+则：
+
+```text
+8000 + 5000
+= 13000
+> 10000
+```
+
+本次结果被拒绝。
+
+并且被拒绝的 5000 字符不会计入：
+
+```text
+used_chars
+```
+
+---
+
+### 7. 为什么同时需要文件数和字符数预算
+
+只有：
+
+```text
+max_files
+```
+
+时，模型可能只读取几个非常大的文件。
+
+只有：
+
+```text
+max_chars
+```
+
+时，模型又可能不断读取大量非常小的文件。
+
+因此同时使用：
+
+```text
+max_files
++
+max_chars
+```
+
+分别控制：
+
+```text
+文件数量
++
+证据总体积
+```
+
+能够更有效限制模型无目的地扩大读取范围。
+
+---
+
+### 8. 字符预算使用 len(content)，而不是 size_bytes
+
+当前预算关注的是：
+
+```text
+有多少文本字符进入模型上下文
+```
+
+而不是：
+
+```text
+文件在磁盘上占多少字节
+```
+
+因此对于 `read_repo_file`：
+
+```python
+len(result["content"])
+```
+
+比：
+
+```text
+size_bytes
+```
+
+更加符合当前 EvidenceBudget 的语义。
+
+特别是中文 UTF-8 文本中：
+
+```text
+字符数量
+≠
+字节数量
+```
+
+---
+
+### 9. 预算由 Python 控制，而不是依赖 Prompt
+
+如果只在 System Prompt 中告诉模型：
+
+```text
+不要读取太多文件
+```
+
+这只是一个软约束。
+
+模型仍然可能请求：
+
+```text
+read file1
+read file2
+...
+read file20
+```
+
+现在真正决定是否允许执行的是：
+
+```text
+EvidenceBudget
+```
+
+因此流程变成：
+
+```text
+LLM：
+我想继续读取
+
+↓ 请求
+
+Python：
+检查预算
+
+↓ 允许
+
+执行Tool
+
+或
+
+↓ 拒绝
+
+BudgetExceeded
+```
+
+这让我理解到：
+
+```text
+模型拥有决策能力
+≠
+模型拥有无限执行权限
+```
+
+真正的安全边界应该由确定性程序控制。
+
+---
+
+### 10. 预算拒绝也必须返回 ToolMessage
+
+假设同一个 AIMessage 请求：
+
+```text
+Tool Call A
+Tool Call B
+```
+
+执行 A 后预算耗尽。
+
+不能直接：
+
+```text
+break
+```
+
+然后不给 B 返回结果。
+
+否则消息历史中会出现：
+
+```text
+Tool Call A → ToolMessage
+Tool Call B → 没有对应结果
+```
+
+正确做法是：
+
+```text
+Tool Call A
+→ 正常ToolMessage
+
+Tool Call B
+→ BudgetExceeded ToolMessage
+```
+
+并保持：
+
+```text
+tool_call["id"]
+=
+ToolMessage.tool_call_id
+```
+
+这样即使 Tool 没有真正执行，
+Tool Calling 消息协议仍然完整。
+
+---
+
+### 11. Tool 结果日志只保存摘要
+
+如果直接：
+
+```text
+logger.info(tool_result)
+```
+
+`read_repo_file` 很可能把完整源码写入日志。
+
+因此增加 Tool 结果摘要。
+
+例如：
+
+```text
+read_repo_file
+→ source_path
+→ chars
+→ elapsed
+→ attempts
+```
+
+而不是记录整个：
+
+```text
+content
+```
+
+目录树和文件排序也只记录：
+
+```text
+file_count
+candidate_count
+top_files
+truncated
+```
+
+等必要信息。
+
+这样日志既能够帮助定位问题，
+又不会变成第二份源码或敏感数据存储。
+
+---
+
+### 12. 自动化测试
+
+今天新增 safeguards 相关 pytest。
+
+当前全量测试结果：
+
+```text
+17 passed in 2.31s
+```
+
+测试覆盖包括：
+
+* 不同目标文件排序；
+* Top-N 限制；
+* 推荐文件真实存在；
+* README 真实证据片段；
+* Repository Tools 独立调用；
+* Tool 参数错误；
+* `.env` 文件访问限制；
+* Tool 注册表；
+* ToolMessage 与原 Tool Call ID 对应；
+* 敏感日志字段脱敏；
+* 文件数量预算；
+* 暂时性失败重试；
+* 确定性错误不重试；
+* 日志不暴露 API Key。
+
+如果补充字符预算测试后，
+应同步更新这里的测试总数和结果。
+
+---
+
+### 当前不足
+
+当前 safeguards 仍是第一版：
+
+* 当前只有耗时统计，没有真正的强制 Tool 超时；
+* EvidenceBudget 主要限制 Tool 结果进入模型上下文，
+  不能阻止文件首先被读取到 Python 内存；
+* 重试策略仍然较简单；
+* 当前主要根据结构化字段名称进行日志脱敏；
+* 尚未实现复杂的秘密文本检测；
+* 当前 Tool Calling 仍然是手写有限循环；
+* 预算大小仍需要通过更多真实仓库实验调整。
+
+---
+
+### 今天的核心认识
+
+昨天解决的问题是：
+
+```text
+模型会不会使用Tool？
+```
+
+今天解决的问题是：
+
+```text
+即使模型会使用Tool，
+程序应该允许它做到什么程度？
+```
+
+当前形成的职责划分是：
+
+```text
+LLM
+↓
+理解目标
+选择Tool
+生成参数
+
+Python
+↓
+验证Tool
+检查预算
+保护敏感信息
+执行Tool
+控制重试
+记录日志
+限制范围
+返回结果
+```
+
+因此 RepoMentor 当前的 Agent 设计逐渐变成：
+
+```text
+LLM负责决策
++
+Tool负责能力
++
+确定性代码负责安全边界
+```
+
+而不是让 LLM 无限制控制整个程序。
+
+---
+
+### 下一步
+
+完成 V0.4 源码证据层的三仓库验证：
+
+* 在 RepoMentor 自身进行完整验证；
+* 选择另外两个小型 Python 仓库；
+* 使用不同目标测试目标文件排序和 Tool Calling；
+* 人工核对候选文件与真实证据；
+* 检查工具选择是否存在冗余；
+* 检查预算和异常保护；
+* 更新 V0.4 演示和 README。
 

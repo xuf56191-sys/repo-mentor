@@ -1,6 +1,11 @@
 from repo_mentor.target_tool_calling import (
     TOOLS_BY_NAME,
 )
+from repo_mentor.repository_safeguards import (
+    EvidenceBudget,
+    invoke_with_retry,
+    redact_for_log,
+)
 
 import json
 from pathlib import Path
@@ -35,7 +40,10 @@ def test_execute_tool_call_returns_matching_tool_message(
     tmp_path: Path,
 ):
     """Tool执行结果必须和原始tool call id对应。"""
-
+    budget = EvidenceBudget(
+        max_files=2,
+        max_chars=10_000,
+    )
     readme_path = (
         tmp_path / "README.md"
     )
@@ -59,7 +67,8 @@ def test_execute_tool_call_returns_matching_tool_message(
     }
 
     tool_message = execute_tool_call(
-        fake_tool_call
+        fake_tool_call,
+        budget
     )
 
     assert isinstance(
@@ -92,3 +101,59 @@ def test_execute_tool_call_returns_matching_tool_message(
         "Test Repository"
         in result["content"]
     )
+
+    def test_budget_stops_when_char_limit_exceeded():
+        budget = EvidenceBudget(
+            max_files=4,
+            max_chars=100,
+        )
+
+        budget.consume(
+            file_count=1,
+            char_count=80,
+        )
+
+        assert budget.stopped is False
+        assert budget.used_chars == 80
+
+        budget.consume(
+            file_count=1,
+            char_count=30,
+        )
+
+        assert budget.stopped is True
+
+        # 第二次消费应该被拒绝
+        assert budget.used_files == 1
+        assert budget.used_chars == 80
+
+        assert budget.stop_reason is not None
+        assert "字符" in budget.stop_reason
+
+def test_budget_stops_when_char_limit_exceeded():
+    budget = EvidenceBudget(
+        max_files=4,
+        max_chars=100,
+    )
+
+    budget.consume(
+        file_count=1,
+        char_count=80,
+    )
+
+    assert budget.stopped is False
+    assert budget.used_chars == 80
+
+    budget.consume(
+        file_count=1,
+        char_count=30,
+    )
+
+    assert budget.stopped is True
+
+    # 第二次消费应该被拒绝
+    assert budget.used_files == 1
+    assert budget.used_chars == 80
+
+    assert budget.stop_reason is not None
+    assert "字符" in budget.stop_reason

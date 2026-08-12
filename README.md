@@ -161,6 +161,106 @@ read_repo_file
 - 测验和学习进度保存；
 - Streamlit 页面。
 
+## Repository Tool Safeguards
+
+RepoMentor 在目标驱动 Tool Calling 外增加了一层确定性的工具执行保护机制。
+
+当前 Repository Tool 执行流程为：
+
+```text
+AIMessage.tool_calls
+↓
+检查 Tool 是否存在
+↓
+检查证据读取预算
+↓
+对日志参数进行敏感字段脱敏
+↓
+执行 Tool 并记录耗时
+↓
+暂时性失败最多重试一次
+↓
+生成安全的结果摘要
+↓
+统计文件数和文本字符预算
+↓
+ToolMessage
+↓
+返回模型继续推理
+```
+
+当前保护能力包括：
+
+* 对 Tool 调用记录执行名称、耗时、尝试次数和结果摘要；
+* 不在日志中输出完整源码内容；
+* 对 `api_key`、`token`、`password`、`secret`、`authorization` 等敏感字段进行递归脱敏；
+* 使用 `EvidenceBudget` 限制进入模型上下文的文件数量；
+* 使用 `EvidenceBudget` 限制进入模型上下文的文本字符总量；
+* 暂时性的 `TimeoutError`、`ConnectionError`、部分 `OSError` 最多额外重试一次；
+* 参数错误、非法路径和安全限制等确定性错误不会进行无意义重试；
+* Tool 最终失败后返回结构化错误，而不是直接终止整个 Agent；
+* 当证据预算耗尽后，后续读取请求会得到 `BudgetExceeded`，模型根据已经获取的真实证据完成总结。
+
+### Evidence Budget
+
+当前证据预算限制的是提供给模型的仓库文本证据，而不是磁盘读取字节数。
+
+例如：
+
+```text
+max_files = 4
+max_chars = 30000
+```
+
+表示一次目标驱动分析最多允许有限数量的真实文件正文和文本字符进入模型上下文。
+
+文件数量和字符数量同时受到限制：
+
+* 文件数预算防止模型无目的地读取大量小文件；
+* 字符预算防止模型读取少量但体积巨大的文件。
+
+预算由确定性 Python 代码维护，而不是依赖 Prompt 要求模型自行遵守。
+
+## Testing
+
+项目使用 `pytest` 对仓库证据层进行自动化测试。
+
+当前测试覆盖：
+
+* 目标相关文件排序及真实路径验证；
+* README 真实引用证据；
+* Repository Tools 独立调用；
+* Tool 参数 Schema 和敏感文件读取限制；
+* Tool 注册表和 `ToolMessage` 调用 ID 对应关系；
+* 敏感字段日志脱敏；
+* 文件读取预算限制；
+* 字符读取预算限制；
+* 暂时性错误最多重试一次；
+* 确定性错误不进行无意义重试；
+* 日志中不暴露 API Key。
+
+运行全部测试：
+
+```bash
+python -m pytest -v
+```
+
+## Current Limitations
+
+当前安全执行层仍属于 V0.4 阶段的第一版实现：
+
+* 当前记录 Tool 实际耗时，但尚未实现真正的强制执行超时；
+* 当前字符预算限制的是 Tool 结果进入模型上下文的文本量，文件可能已经先被读取到 Python 内存；
+* 重试策略目前较简单，尚未使用指数退避等机制；
+* Tool Calling 仍使用手写有限循环，尚未迁移到 LangGraph；
+* 当前主要保护结构化敏感字段，不进行复杂的自由文本密钥模式扫描；
+* Tool description 和预算参数仍需要通过更多真实仓库实验继续调整。
+
+RepoMentor 当前仍坚持：
+
+**模型负责决策，确定性代码负责执行、验证和安全边界。**
+
+
 ## 目标相关仓库证据
 
 RepoMentor 不把“仓库中最重要的文件”
