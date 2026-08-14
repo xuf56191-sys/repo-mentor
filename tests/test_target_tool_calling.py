@@ -102,34 +102,6 @@ def test_execute_tool_call_returns_matching_tool_message(
         in result["content"]
     )
 
-    def test_budget_stops_when_char_limit_exceeded():
-        budget = EvidenceBudget(
-            max_files=4,
-            max_chars=100,
-        )
-
-        budget.consume(
-            file_count=1,
-            char_count=80,
-        )
-
-        assert budget.stopped is False
-        assert budget.used_chars == 80
-
-        budget.consume(
-            file_count=1,
-            char_count=30,
-        )
-
-        assert budget.stopped is True
-
-        # 第二次消费应该被拒绝
-        assert budget.used_files == 1
-        assert budget.used_chars == 80
-
-        assert budget.stop_reason is not None
-        assert "字符" in budget.stop_reason
-
 def test_budget_stops_when_char_limit_exceeded():
     budget = EvidenceBudget(
         max_files=4,
@@ -157,3 +129,23 @@ def test_budget_stops_when_char_limit_exceeded():
 
     assert budget.stop_reason is not None
     assert "字符" in budget.stop_reason
+
+def test_default_max_rounds_is_at_least_three():
+    """默认 Tool Calling 轮次应支持发现→排序→读源码三阶段。"""
+
+    import inspect
+
+    from repo_mentor.target_tool_calling import (
+        run_target_tool_calling,
+    )
+
+    signature = inspect.signature(
+        run_target_tool_calling
+    )
+
+    assert (
+        signature.parameters[
+            "max_rounds"
+        ].default
+        >= 3
+    )

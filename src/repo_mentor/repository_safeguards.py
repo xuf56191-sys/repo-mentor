@@ -484,7 +484,10 @@ def calculate_evidence_cost(
             [],
         )
 
-        file_count = len(documents)
+        # 整份 onboarding 资料（README、pyproject 等）
+        # 算作一个证据单元，避免一次调用
+        # 占用多个文件名额，挤占核心源码的读取预算。
+        file_count = 1 if documents else 0
 
         char_count = sum(
             len(

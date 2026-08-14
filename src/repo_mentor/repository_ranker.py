@@ -92,7 +92,42 @@ TARGET_KEYWORD_MAP = {
         "config",
         "settings",
         "pyproject",
-        "requirements",
+    },
+    "签名": {
+        "sign",
+        "signer",
+        "signature",
+    },
+    "序列化": {
+        "serialize",
+        "serializer",
+        "serialization",
+    },
+    "反序列化": {
+        "unserialize",
+        "deserialize",
+        "loads",
+    },
+    "解析": {
+        "parse",
+        "parser",
+        "parsing",
+    },
+    "验证": {
+        "verify",
+        "verification",
+        "validate",
+        "validation",
+    },
+    "恢复": {
+        "recover",
+        "recovery",
+        "unsign",
+        "restore",
+    },
+    "数据": {
+        "data",
+        "payload",
     },
     "测试": {
         "test",
@@ -168,6 +203,25 @@ ONBOARDING_FILE_NAMES = {
     "contributing.md",
 }
 
+# 图片、字体、二进制等非证据资源文件，
+# 不参与目标相关文件排序。
+NON_EVIDENCE_EXTENSIONS = {
+    ".svg",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".ico",
+    ".woff",
+    ".woff2",
+    ".ttf",
+    ".eot",
+    ".pyc",
+    ".lock",
+    ".whl",
+    ".zip",
+}
+
 
 def is_test_file(
     relative_path: str,
@@ -234,6 +288,15 @@ def score_candidate_file(
         .lower()
     )
 
+    # 资源 / 二进制文件不作为证据候选。
+    if (
+        Path(relative_path)
+        .suffix
+        .lower()
+        in NON_EVIDENCE_EXTENSIONS
+    ):
+        return None
+
     score = 0.0
     reasons: list[str] = []
     evidence: list[RepositoryEvidence] = []
@@ -289,7 +352,16 @@ def score_candidate_file(
         )
 
         if snippet is not None:
-            score += 3.0
+            if (
+                filename_lower.endswith(".py")
+                and not is_test_file(relative_path)
+            ):
+                # 源码文件被 README 明确引用，可信度最高
+                score += 3.0
+            else:
+                # logo、requirements.txt、tree.txt 等被引用时降权，
+                # 避免它们压过核心源码
+                score += 1.0
 
             reasons.append(
                 "README明确引用了该文件"
@@ -402,7 +474,36 @@ def score_candidate_file(
         )
 
     # -------------------------------------------------
-    # 规则6：README / CONTRIBUTING
+    # 规则6：核心 Python 源码文件
+    # -------------------------------------------------
+
+    if (
+        filename_lower.endswith(".py")
+        and not is_test_file(relative_path)
+        and filename_lower not in ENTRY_FILE_NAMES
+        and filename_lower not in CONFIG_FILE_NAMES
+        and filename_lower not in ONBOARDING_FILE_NAMES
+    ):
+        score += 2.0
+
+        reasons.append(
+            "该文件属于仓库核心 Python 源码"
+        )
+
+        evidence.append(
+            RepositoryEvidence(
+                source_path=relative_path,
+                snippet=None,
+                reason=(
+                    "该文件真实存在，并属于"
+                    "核心 Python 源码文件。"
+                ),
+                confidence=0.60,
+            )
+        )
+
+    # -------------------------------------------------
+    # 规则7：README / CONTRIBUTING
     # -------------------------------------------------
 
     if filename_lower in ONBOARDING_FILE_NAMES:

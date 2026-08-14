@@ -50,15 +50,20 @@ def build_messages(
             "\n"
             "请遵守以下规则：\n"
             "1. 不知道仓库有哪些真实文件时，可以使用 get_repo_tree。\n"
-            "2. 需要了解 README、依赖、贡献说明时，"
-            "可以使用 get_onboarding_docs。\n"
+            "2. 只有当目标涉及项目介绍、安装方式、依赖或贡献方式时，"
+            "才使用 get_onboarding_docs；如果目标是理解某个具体模块的"
+            "实现或测试，请跳过 onboarding 文档，直接 "
+            "rank_target_files 再 read_repo_file。\n"
             "3. 已经有明确目标，需要确定最值得阅读哪些文件时，"
             "优先考虑 rank_target_files。\n"
             "4. 只有已经确认真实存在的文件，"
             "才可以使用 read_repo_file 读取内容。\n"
-            "5. 不要为了通用了解一次读取大量源码。\n"
-            "6. 当现有证据已经足够回答目标时，应停止调用工具。\n"
-            "7. 不要猜测不存在的文件或尚未读取的源码内容。"
+            "5. 当目标包含「如何被测试」或「测试覆盖」时，"
+            "应在候选文件中优先读取体积更小的测试文件，"
+            "再读取对应实现文件，避免大实现文件先耗尽字符预算。\n"
+            "6. 不要为了通用了解一次读取大量源码。\n"
+            "7. 当现有证据已经足够回答目标时，应停止调用工具。\n"
+            "8. 不要猜测不存在的文件或尚未读取的源码内容。"
         )
     )
 
@@ -322,7 +327,7 @@ def run_target_tool_calling(
     repository_path: str,
     target_task: TargetTask,
     *,
-    max_rounds: int = 2,
+    max_rounds: int = 3,
     max_evidence_files: int = 4,
     max_evidence_chars: int = 30_000,
 ):
@@ -418,10 +423,9 @@ def run_target_tool_calling(
             return {
                 "final_message": ai_message,
                 "messages": messages,
-                "tool_call_count": (
-                    total_tool_calls
-                ),
+                "tool_call_count": total_tool_calls,
                 "rounds": round_index,
+                "budget": budget,
             }
 
         # 7. 模型要求调用一个或多个Tool
@@ -530,10 +534,9 @@ def run_target_tool_calling(
     return {
         "final_message": final_message,
         "messages": messages,
-        "tool_call_count": (
-            total_tool_calls
-        ),
-        "rounds": max_rounds,
+        "tool_call_count": total_tool_calls,
+        "rounds": round_index,
+        "budget": budget,
     }
 
 def configure_logging(

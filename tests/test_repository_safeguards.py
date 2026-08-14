@@ -1,5 +1,6 @@
 from repo_mentor.repository_safeguards import (
     EvidenceBudget,
+    calculate_evidence_cost,
     invoke_with_retry,
     redact_for_log,
 )
@@ -33,62 +34,6 @@ def test_redact_for_log_hides_sensitive_values():
     )
 
     assert secret not in str(safe)
-
-def test_redact_for_log_hides_sensitive_values():
-    secret = "sk-super-secret"
-
-    data = {
-        "MODEL_API_KEY": secret,
-        "nested": {
-            "password": "123456",
-            "max_depth": 4,
-        },
-    }
-
-    safe = redact_for_log(data)
-
-    assert (
-        safe["MODEL_API_KEY"]
-        == "***REDACTED***"
-    )
-
-    assert (
-        safe["nested"]["password"]
-        == "***REDACTED***"
-    )
-
-    assert (
-        safe["nested"]["max_depth"]
-        == 4
-    )
-
-    assert secret not in str(safe)
-
-def test_budget_stops_at_file_limit():
-    budget = EvidenceBudget(
-        max_files=2,
-        max_chars=10_000,
-    )
-
-    budget.consume(
-        file_count=1,
-        char_count=100,
-    )
-
-    assert budget.stopped is False
-
-    budget.consume(
-        file_count=1,
-        char_count=100,
-    )
-
-    assert budget.used_files == 2
-    assert budget.stopped is True
-
-    assert "文件预算" in (
-        budget.stop_reason
-        or ""
-    )
 
 def test_budget_stops_at_file_limit():
     budget = EvidenceBudget(
@@ -237,5 +182,39 @@ def test_log_does_not_expose_api_key(
     assert (
         "***REDACTED***"
         in caplog.text
+    )
+
+def test_onboarding_docs_count_as_single_file_unit():
+    """整份 onboarding 资料应只占用一个文件名额。"""
+
+    result = {
+        "ok": True,
+        "documents": [
+            {
+                "content": "readme body",
+                "source_path": "README.md",
+            },
+            {
+                "content": "toml body",
+                "source_path": "pyproject.toml",
+            },
+            {
+                "content": "docs body",
+                "source_path": "docs/index.rst",
+            },
+        ],
+    }
+
+    file_count, char_count = (
+        calculate_evidence_cost(
+            "get_onboarding_docs",
+            result,
+        )
+    )
+
+    assert file_count == 1
+    assert char_count == sum(
+        len(document["content"])
+        for document in result["documents"]
     )
 

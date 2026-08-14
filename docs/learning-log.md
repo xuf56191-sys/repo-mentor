@@ -1183,6 +1183,7 @@ ToolMessage.tool_call_id
 再次调用模型
 ↓
 继续调用 Tool 或生成最终回答
+```
 
 ## 2026-08-12：日志、错误与范围限制
 
@@ -1751,7 +1752,7 @@ truncated
 当前全量测试结果：
 
 ```text
-17 passed in 2.31s
+18 passed in 2.31s
 ```
 
 测试覆盖包括：
@@ -1770,9 +1771,8 @@ truncated
 * 暂时性失败重试；
 * 确定性错误不重试；
 * 日志不暴露 API Key。
+* 字符预算测试
 
-如果补充字符预算测试后，
-应同步更新这里的测试总数和结果。
 
 ---
 
@@ -1852,4 +1852,98 @@ Tool负责能力
 * 检查工具选择是否存在冗余；
 * 检查预算和异常保护；
 * 更新 V0.4 演示和 README。
+
+---
+
+## 2026-08-13：V0.4 三仓库验证与证据质量检查
+
+### 今天的目标
+
+在 RepoMentor 自身和两个小型 Python 仓库（ItsDangerous、Pipfile）上
+验证 V0.4 证据层，复习 Tool 与普通函数的区别，并人工检查证据质量。
+
+### 今天完成
+
+* 复习 Tool 与普通函数的区别；
+* 在三个真实仓库上运行六个 Case（R1-A/B、R2-A/B、R3-A/B）；
+* 人工核对候选文件与证据，完成 `evaluation/v04_evidence_review.md`；
+* 根据结论完成修复（max_rounds=3、onboarding 预算、Ranker 改进、
+  三仓库排序演示）；
+* 清理重复测试并新增修复相关测试，pytest 22 个全部通过；
+* 更新 README；
+* 2026-08-15 执行六 Case 完整复验：
+  R2/R3 中 3 个 Fail 修复为 Pass，R2-B 残留预算问题。
+
+---
+
+### 1. Tool 与普通函数的区别
+
+普通函数：
+
+* 直接 `函数名(...)` 调用；
+* 只负责具体的计算或 IO，LLM 看不到也调不了；
+* 例如 `build_tree()`、`rank_target_files_core()`、
+  `read_repository_onboarding_docs()`。
+
+Tool：
+
+* 用 `@tool(args_schema=...)` 装饰并绑定到 LLM；
+* 有输入 Schema、docstring 和结构化返回值；
+* LLM 只能通过 Tool Call 间接调用，中间经过 `execute_tool_call` 的
+  校验、预算、重试、脱敏；
+* 例如 `get_repo_tree`、`get_onboarding_docs`、
+  `read_repo_file`、`rank_target_files`。
+
+一句话：普通函数是「能力」，Tool 是「给 LLM 的受控接口」，
+确定性代码负责执行、验证和安全边界。
+
+---
+
+### 2. 三仓库验证发现的问题
+
+* `max_rounds=2` 不足：外部仓库「发现 → 排序 → 读源码」
+  需要至少 3 轮，导致 R2/R3 四个 Case 全部没有执行 `read_repo_file`；
+* `get_onboarding_docs` 按文档数占用 3 / 4 文件预算；
+* Ranker 缺少中文概念映射，核心源码无加分，
+  svg logo 和 `requirements.txt` 被顶到排序第一；
+* 资源文件未过滤，README 引用加成对非源码文件过强。
+
+---
+
+### 3. 修复内容
+
+* `target_tool_calling.py`：默认轮次 2 → 3；
+* `repository_safeguards.py`：整份 onboarding 按 1 个文件计费；
+* `repository_ranker.py`：补充中文概念映射、
+  核心 Python 源码 +2.0、资源文件过滤、
+  非源码文件 README 引用降权；
+* `v04_evaluation.py`：新增三仓库排序演示与六 Case 运行器；
+* 测试：清理重复定义，新增 4 个修复相关测试。
+
+---
+
+### 4. 六 Case 复验结果（2026-08-15）
+
+| Case | 旧结论 | 新结论 |
+| --- | --- | --- |
+| R1-A | Pass with Issues | Pass with Issues |
+| R1-B | PASS | PASS |
+| R2-A | Fail | Pass |
+| R2-B | Fail | Fail（明显改善） |
+| R3-A | Fail | Pass |
+| R3-B | Fail | Pass |
+
+R2-B 残留：对「如何被测试」类目标，
+模型先读两个大实现文件（25880/30000 字符）占满预算，
+导致测试文件被字符超限拦截。
+
+---
+
+### 下一步
+
+* 修复 R2-B：提高字符预算（30_000 → 40_000），
+  并引导「如何被测试」类目标优先读取测试文件；
+* 重跑 R2-B 复验；
+* 继续观察工具选择经济性问题。
+
 

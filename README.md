@@ -115,6 +115,15 @@ RepoMentor 当前已经完成 V0.2 个性化路线原型，
 - Tool 执行错误能够返回可读的结构化错误；
 - `read_repo_file` 拒绝读取 `.env` 等被忽略或敏感路径；
 - 开始使用 pytest 验证 Repository Tools 的独立调用行为。
+- 在 RepoMentor 自身、ItsDangerous、Pipfile 三个真实仓库上
+  完成 V0.4 三仓库验证；
+- 目标相关文件排序补充中文概念映射
+  （签名、序列化、解析、验证、恢复等）；
+- 核心 Python 源码文件在目标排序中获得加分，
+  图片等资源文件被过滤，不再进入候选；
+- onboarding 资料按一个证据单元计入文件预算，
+  避免一次占用多个文件名额；
+- Tool Calling 默认支持 3 轮「发现 → 排序 → 读源码」流程。
 
 
 
@@ -221,29 +230,6 @@ max_chars = 30000
 
 预算由确定性 Python 代码维护，而不是依赖 Prompt 要求模型自行遵守。
 
-## Testing
-
-项目使用 `pytest` 对仓库证据层进行自动化测试。
-
-当前测试覆盖：
-
-* 目标相关文件排序及真实路径验证；
-* README 真实引用证据；
-* Repository Tools 独立调用；
-* Tool 参数 Schema 和敏感文件读取限制；
-* Tool 注册表和 `ToolMessage` 调用 ID 对应关系；
-* 敏感字段日志脱敏；
-* 文件读取预算限制；
-* 字符读取预算限制；
-* 暂时性错误最多重试一次；
-* 确定性错误不进行无意义重试；
-* 日志中不暴露 API Key。
-
-运行全部测试：
-
-```bash
-python -m pytest -v
-```
 
 ## Current Limitations
 
@@ -297,6 +283,29 @@ RepoMentor 会将其标记为：
 
 避免根据文件名直接推断文件内部实现。
 
+## V0.4 三仓库验证
+
+在 RepoMentor 自身、ItsDangerous、Pipfile 三个真实仓库上，
+各用两个不同目标验证目标文件排序与 Tool Calling。
+
+结果汇总（详见 `evaluation/v04_evidence_review.md`）：
+
+- R1 RepoMentor：通过（存在工具选择经济性问题）；
+- R2 ItsDangerous：初版失败（两轮不足、核心源码排序偏低）；
+- R3 Pipfile：初版失败（同上）。
+
+据此做出以下修复：
+
+- Tool Calling 默认轮次由 2 提升到 3，
+  支持「发现 → 排序 → 读源码」三阶段；
+- onboarding 文档作为一个证据单元计入文件预算，
+  不再一次占用多个文件名额；
+- 排序器补充中文概念关键词映射
+  （签名、序列化、解析、验证、恢复等）；
+- 核心 Python 源码文件获得排序加分；
+- 过滤图片等非证据资源文件，
+  并对非源码文件的 README 引用降权。
+
 ## 当前限制
 
 当前项目仍处于 V0.4 仓库证据层开发阶段。
@@ -307,8 +316,6 @@ RepoMentor 会将其标记为：
 - 普通源码只有在目标驱动 Tool Calling 明确选择后才会读取；
 - 当前 Tool Calling 使用手写有限循环，
   尚未迁移到 LangGraph；
-- 当前只限制 Tool Calling 轮数，
-  尚未加入完整的文件读取预算和 Token / 字符预算；
 - 尚未实现完善的 Tool 失败重试和调用耗时统计；
 - Tool description 和系统提示词仍需要通过更多目标实验继续优化；
 - 当前模型可能选择“合理但非必要”的额外 Tool，
@@ -352,6 +359,13 @@ AI Agent 是一种能够感知环境、自主决策并采取行动以完成特�
 - `execute_tool_call()` 能根据模型提供的工具名称和参数执行真实 Tool；
 - Tool 执行结果能够转换为 `ToolMessage`；
 - `ToolMessage.tool_call_id` 与原始 Tool Call ID 保持一致。
+
+测试还覆盖了 V0.4 验证后的修复行为：
+
+- onboarding 文档按一个证据单元计入文件预算；
+- 核心 Python 源码在目标排序中排在对应测试文件之前；
+- 图片等资源文件被过滤，不会进入候选列表；
+- 默认 Tool Calling 轮次支持三阶段流程。
 
 运行全部测试：
 
@@ -486,56 +500,3 @@ pip install -r requirements.txt
 python -m src.repo_mentor.config
 ```
 
-## Tests
-
-项目开始使用 `pytest` 对仓库证据层进行自动化验证。
-
-当前测试主要位于：
-
-```text
-tests/
-└── test_repository_ranker.py
-
-## 下一步任务
-
-下一步将完成：
-
-1. 设计 RepoMentor 的学习路线 Prompt；
-2. 将用户资料、仓库 README 和目录树交给模型；
-3. 生成第一版普通文本学习路线；
-4. 比较不同 Prompt 的输出效果；
-5. 检查模型是否推荐了不存在的文件。
-
-## 项目状态
-
-项目目前处于学习和持续开发阶段。
-
-## Engineering Principles
-
-RepoMentor 当前遵循以下原则：
-
-1. **真实路径优先**
-
-   推荐文件必须来自真实文件系统，
-   不允许模型凭空生成仓库路径。
-
-2. **证据和推断分离**
-
-   文件存在、README 引用和源码内容属于不同等级的证据，
-   未读取源码时不会声称已经理解文件内部实现。
-
-3. **确定性操作不用 LLM**
-
-   路径校验、文件存在判断、大小限制、
-   敏感文件过滤和基础规则排序优先使用普通 Python 实现。
-
-4. **目标相关性优先**
-
-   RepoMentor 关注的是
-   “为了当前学习或贡献目标最值得看的文件”，
-   而不是简单返回仓库中通用的重要文件。
-
-5. **逐步增加自动化测试**
-
-   使用 pytest 保存核心行为约束，
-   避免项目增长后只能依赖手工运行验证。

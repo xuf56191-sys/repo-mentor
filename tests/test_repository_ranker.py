@@ -69,57 +69,6 @@ def test_different_targets_get_different_files(
         != roadmap_results[0].file_path
     )
 
-def test_different_targets_get_different_files(
-    tmp_path: Path,
-) -> None:
-    src = tmp_path / "src"
-    src.mkdir()
-
-    (src / "repository_tree.py").write_text(
-        "# tree",
-        encoding="utf-8",
-    )
-
-    (src / "roadmap_generator.py").write_text(
-        "# roadmap",
-        encoding="utf-8",
-    )
-
-    (tmp_path / "README.md").write_text(
-        "# Test Repo",
-        encoding="utf-8",
-    )
-
-    tree_target = create_target(
-        "理解目录树扫描",
-        "理解仓库目录树扫描流程",
-    )
-
-    roadmap_target = create_target(
-        "理解学习路线生成",
-        "理解结构化学习路线生成流程",
-    )
-
-    tree_results = rank_target_files(
-        tmp_path,
-        tree_target,
-        top_n=1,
-    )
-
-    roadmap_results = rank_target_files(
-        tmp_path,
-        roadmap_target,
-        top_n=1,
-    )
-
-    assert tree_results
-    assert roadmap_results
-
-    assert (
-        tree_results[0].file_path
-        != roadmap_results[0].file_path
-    )
-
 def test_top_n_limit(
     tmp_path: Path,
 ) -> None:
@@ -247,4 +196,102 @@ def test_readme_reference_creates_real_snippet(
     assert (
         "repository_tree.py"
         in readme_evidence[0].snippet
+    )
+
+def test_source_file_ranks_above_test_file(
+    tmp_path: Path,
+) -> None:
+    """核心源码文件应排在对应测试文件之前。"""
+
+    src = tmp_path / "src"
+    tests_dir = tmp_path / "tests"
+    src.mkdir()
+    tests_dir.mkdir()
+
+    (src / "signer.py").write_text(
+        "# signer",
+        encoding="utf-8",
+    )
+
+    (tests_dir / "test_signer.py").write_text(
+        "# test",
+        encoding="utf-8",
+    )
+
+    (tmp_path / "README.md").write_text(
+        "# Test Repo",
+        encoding="utf-8",
+    )
+
+    target = create_target(
+        "理解数据签名",
+        "理解数据签名与恢复流程",
+    )
+
+    results = rank_target_files(
+        tmp_path,
+        target,
+        top_n=5,
+    )
+
+    paths = [
+        item.file_path
+        for item in results
+    ]
+
+    assert "src/signer.py" in paths
+    assert paths.index(
+        "src/signer.py"
+    ) < paths.index(
+        "tests/test_signer.py"
+    )
+
+def test_asset_files_are_filtered_out(
+    tmp_path: Path,
+) -> None:
+    """svg 等资源文件不应出现在排序结果中。"""
+
+    src = tmp_path / "src"
+    src.mkdir()
+
+    (src / "signer.py").write_text(
+        "# signer",
+        encoding="utf-8",
+    )
+
+    static_dir = (
+        tmp_path / "docs" / "_static"
+    )
+    static_dir.mkdir(parents=True)
+
+    (static_dir / "logo.svg").write_text(
+        "<svg/>",
+        encoding="utf-8",
+    )
+
+    (tmp_path / "README.md").write_text(
+        "签名见 `src/signer.py`。",
+        encoding="utf-8",
+    )
+
+    target = create_target(
+        "理解数据签名",
+        "理解数据签名与恢复流程",
+    )
+
+    results = rank_target_files(
+        tmp_path,
+        target,
+        top_n=10,
+    )
+
+    paths = [
+        item.file_path
+        for item in results
+    ]
+
+    assert "src/signer.py" in paths
+    assert all(
+        not path.endswith(".svg")
+        for path in paths
     )
