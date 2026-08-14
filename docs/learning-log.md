@@ -1946,4 +1946,35 @@ R2-B 残留：对「如何被测试」类目标，
 * 重跑 R2-B 复验；
 * 继续观察工具选择经济性问题。
 
+## 2026-08-14：设计 AgentState（V0.6 自适应工作流第一步）
 
+### 今天的目标
+
+学习 LangGraph 的 State、共享数据和状态边界，为 V0.6
+自适应工作流定义共享状态模型。
+
+### 今天完成
+
+* 学习 State 与普通 dict 的区别、reducer 的覆盖/累积语义；
+* 新建 workflow_state.py，定义 8 个字段并注明来源与使用节点；
+* 实现 create_initial_state() 与 validate_state_no_secrets()；
+* 新增 5 个单元测试，全部通过；
+* 完成最小 LangGraph 演示（step_count/errors 语义验证）；
+* 提交 feat: define adaptive learning state。
+
+### 1. State、reducer 与状态边界
+
+* State 是节点共享的通道：节点只返回局部更新，LangGraph 合并；
+* messages 用 add_messages（按 id 去重/更新）；
+* errors 用 operator.add（累积）；
+* step_count 用覆盖语义（节点自己 +1）；
+* State 不放 API Key，validate_state_no_secrets 只查键名防误报；
+* 模块导入不应有副作用：演示代码必须放在独立文件或
+  if __name__ == "__main__" 里。
+
+### 2. 今天踩的坑
+
+* `target_task: TargetTask` 存了类而不是实例；
+* `def f(state, Any)` 是两参数不是注解；
+* `str(key).lower` 少了括号；
+* 测试里 `message` 写成单数导致 KeyError（fail loudly 是好事）。
