@@ -1978,3 +1978,43 @@ R2-B 残留：对「如何被测试」类目标，
 * `def f(state, Any)` 是两参数不是注解；
 * `str(key).lower` 少了括号；
 * 测试里 `message` 写成单数导致 KeyError（fail loudly 是好事）。
+
+## 2026-08-15：拆分核心节点（V0.6 自适应工作流第二步）
+
+### 今天的目标
+
+学习节点读取 State、返回局部更新和单一职责，
+为 V0.6 自适应工作流拆分核心节点。
+
+### 今天完成
+
+* 学习单一职责：一个节点只做一件事，输出是下一步的输入；
+* AgentState 新增 5 个字段（repository_path、learner_analysis、
+  target_analysis、repo_readme、repo_tree）；
+* 新建 adaptive_nodes.py：analyze_learner / analyze_target /
+  collect_evidence / generate_roadmap 四个节点；
+* 修复 roadmap_generator.py 与 prompt_experiment.py 的
+  脆弱 import（改为 repo_mentor. 前缀）；
+* 4 个节点各配一个独立单元测试（generate_roadmap 用
+  monkeypatch 打桩，不调真实 LLM），全部通过；
+* 4 节点最小图运行验证 State 流转；
+* 提交 feat: add adaptive planning nodes。
+
+### 1. 节点与单一职责
+
+* 节点 = 函数(state) -> 局部更新 dict；
+* 判断职责的口诀：输入是什么、输出是什么、
+  为什么输出刚好是下一步要用的；
+* 需要 LLM 的只有 generate_roadmap，其余三个节点
+  都是纯规则或复用 V0.4 证据层。
+
+### 2. 测试里如何不花钱地测 LLM 节点
+
+* monkeypatch 用假函数替换真实依赖，测试快、免费、可重复；
+* 顺带断言参数被正确传递（captured 记录）。
+
+### 3. 挖出的历史技术债
+
+* roadmap_generator / prompt_experiment / repository_service /
+  evaluation_runner / model_demo 存在裸 import 或 src. 前缀，
+  已修前两者，其余列入待清理。

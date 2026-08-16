@@ -7,8 +7,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from llm_service import create_llm
-from prompts import ROADMAP_PROMPTS
+from repo_mentor.llm_service import create_llm
+from repo_mentor.prompts import ROADMAP_PROMPTS
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]

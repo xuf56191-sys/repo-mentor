@@ -49,6 +49,11 @@ class AgentState(TypedDict, total=False):
     errors: Annotated[list[str], operator.add]  # 产生: 任意节点捕获的错误
     step_count: int                          # 产生: 每个节点自增; 消费: 终止条件
 
+    repository_path: str  # 产生: 用户输入; 消费: collect_evidence
+    learner_analysis: dict[str, Any]  # 产生: analyze_learner; 消费: generate_roadmap
+    target_analysis: dict[str, Any]  # 产生: analyze_target; 消费: collect_evidence
+    repo_readme: str  # 产生: collect_evidence; 消费: generate_roadmap
+    repo_tree: str  # 产生: collect_evidence; 消费: generate_roadmap
 
 def create_initial_state(
         learner_profile:LearnerProfile,
@@ -98,3 +103,8 @@ def validate_state_no_secrets(state:Any)->bool:
 # | messages        | 所有节点              | 所有节点                          |
 # | errors          | 任意节点              | 终止节点/用户提示                  |
 # | step_count      | 每个节点自增          | 终止条件（max_steps）              |
+# | repository_path | 用户输入            | collect_evidence                |
+# | learner_analysis| analyze_learner     | generate_roadmap                |
+# | target_analysis | analyze_target      | collect_evidence                |
+# | repo_readme     | collect_evidence    | generate_roadmap                |
+# | repo_tree       | collect_evidence    | generate_roadmap                |

@@ -8,10 +8,10 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from llm_service import create_llm
-from models import LearningRoadmap
-from prompts import FINAL_ROADMAP_PROMPT
-from src.repo_mentor.prompt_experiment import PROJECT_ROOT
+from repo_mentor.llm_service import create_llm
+from repo_mentor.models import LearningRoadmap
+from repo_mentor.prompts import FINAL_ROADMAP_PROMPT
+from repo_mentor.prompt_experiment import PROJECT_ROOT
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_DEMO_REPO = PROJECT_ROOT / "data" / "demo_repo"
