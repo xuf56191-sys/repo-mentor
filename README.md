@@ -82,12 +82,12 @@ RepoMentor 后续将结合 openEuler 开源实习进行真实场景验证。
 
 ## 当前版本
 
-当前版本为 **V0.4 开发阶段**
+当前版本为 **V0.6 开发阶段**
 
 ## 当前已实现
 
-RepoMentor 当前已经完成 V0.2 个性化路线原型，
-并正在实现 V0.4 真实仓库证据层。
+RepoMentor 当前已经完成 V0.2 个性化路线原型和 V0.4 真实仓库证据层，
+正在实现 V0.6 自适应工作流（基于 LangGraph）。
 
 目前支持：
 
@@ -124,6 +124,14 @@ RepoMentor 当前已经完成 V0.2 个性化路线原型，
 - onboarding 资料按一个证据单元计入文件预算，
   避免一次占用多个文件名额；
 - Tool Calling 默认支持 3 轮「发现 → 排序 → 读源码」流程。
+- 定义 LangGraph 共享状态 `AgentState`（13 个字段，含 reducer 合并语义）；
+- 提供 `validate_state_no_secrets` 防止敏感信息进入状态；
+- 拆分四个单一职责节点：`analyze_learner`、`analyze_target`、
+  `collect_evidence`、`generate_roadmap`；
+- 组装基础工作流图：一次 invoke 从画像和目标生成结构化
+  `LearningRoadmap`；
+- 节点与图均有单元测试，LLM 依赖通过 monkeypatch 打桩，
+  测试不花钱、不联网、可重复。
 
 
 
@@ -164,8 +172,8 @@ read_repo_file
 
 当前还没有完成：
 
-- 自动读取真实本地仓库；
-- LangGraph 工作流；
+- 完整的 LangGraph 自适应工作流
+  （分支路由、证据补充循环、人工确认、掌握度闭环仍在后续步骤）；
 - 代码库 RAG 问答；
 - 测验和学习进度保存；
 - Streamlit 页面。
@@ -238,7 +246,8 @@ max_chars = 30000
 * 当前记录 Tool 实际耗时，但尚未实现真正的强制执行超时；
 * 当前字符预算限制的是 Tool 结果进入模型上下文的文本量，文件可能已经先被读取到 Python 内存；
 * 重试策略目前较简单，尚未使用指数退避等机制；
-* Tool Calling 仍使用手写有限循环，尚未迁移到 LangGraph；
+* V0.4 目标驱动 Tool Calling 仍为手写有限循环；
+  V0.6 自适应工作流已迁移到 LangGraph；
 * 当前主要保护结构化敏感字段，不进行复杂的自由文本密钥模式扫描；
 * Tool description 和预算参数仍需要通过更多真实仓库实验继续调整。
 
@@ -306,16 +315,54 @@ RepoMentor 会将其标记为：
 - 过滤图片等非证据资源文件，
   并对非源码文件的 README 引用降权。
 
+## V0.6 自适应工作流
+
+基于 LangGraph 把 V0.4 的证据层能力组织成自适应工作流。
+
+### 共享状态 AgentState
+
+所有节点共享的状态，字段包括：
+
+- 输入：`learner_profile`、`target_task`、`repository_path`；
+- 中间产物：`learner_analysis`、`target_analysis`、`repo_evidence`、
+  `repo_readme`、`repo_tree`；
+- 输出：`roadmap`、`mastery`；
+- 运行时：`messages`（`add_messages` 去重合并）、`errors`（累积）、
+  `step_count`。
+
+State 不保存 API Key 等敏感信息，
+`validate_state_no_secrets` 只检查键名，避免把普通单词误判为密钥。
+
+### 四个核心节点
+
+```text
+analyze_learner（纯规则）
+→ analyze_target（复用目标关键词提取）
+→ collect_evidence（复用 V0.4 证据层）
+→ generate_roadmap（唯一调用 LLM）
+```
+
+### 基础工作流图
+
+`adaptive_workflow.py` 提供：
+
+- `build_adaptive_graph()`：组装并编译基础图；
+- `run_adaptive_workflow(repository_path, learner_profile, target_task)`
+  → 一次 invoke 返回结构化 `LearningRoadmap`。
+
+节点与图均有单元测试；LLM 依赖通过 monkeypatch 打桩，
+测试不花钱、不联网、可重复。
+
 ## 当前限制
 
-当前项目仍处于 V0.4 仓库证据层开发阶段。
+当前项目处于 V0.6 自适应工作流开发阶段（V0.4 证据层已稳定）。
 
 主要限制包括：
 
 - 目标相关文件排序仍主要依赖规则和路径关键词；
 - 普通源码只有在目标驱动 Tool Calling 明确选择后才会读取；
-- 当前 Tool Calling 使用手写有限循环，
-  尚未迁移到 LangGraph；
+- V0.4 目标驱动 Tool Calling 仍为手写循环，
+  V0.6 自适应工作流已使用 LangGraph；
 - 尚未实现完善的 Tool 失败重试和调用耗时统计；
 - Tool description 和系统提示词仍需要通过更多目标实验继续优化；
 - 当前模型可能选择“合理但非必要”的额外 Tool，
@@ -345,7 +392,7 @@ AI Agent 是一种能够感知环境、自主决策并采取行动以完成特�
 
 ## Tests
 
-项目使用 `pytest` 验证仓库证据层和 Tool Calling 的核心行为。
+项目使用 `pytest` 验证仓库证据层、Tool Calling 与 V0.6 自适应工作流的核心行为。
 
 当前测试覆盖：
 
@@ -367,15 +414,24 @@ AI Agent 是一种能够感知环境、自主决策并采取行动以完成特�
 - 图片等资源文件被过滤，不会进入候选列表；
 - 默认 Tool Calling 轮次支持三阶段流程。
 
+测试还覆盖了 V0.6 自适应工作流：
+
+- AgentState 默认值与 reducer 语义（累积/覆盖）与密钥边界；
+- 四个节点各一个独立单元测试；
+- 图结构测试（节点齐全、边顺序与流程图一致）；
+- 整合测试（monkeypatch 打桩后整图一次 invoke 产出路线）。
+
 运行全部测试：
 
 ```bash
 python -m pytest -v
 ```
+
 运行 Tool Calling 测试：
 
 ```bash
 python -m pytest tests/test_target_tool_calling.py -v
+& "D:\Anac\envs\agent\python.exe" -m pytest tests/test_adaptive_workflow.py -v
 ```
 
 
@@ -434,11 +490,20 @@ repo-mentor/
 │       ├── repository_tools.py
 │       ├── repository_ranker.py
 │       ├── roadmap_generator.py
-│       └── target_tool_calling.py
+│       ├── target_tool_calling.py
+│       ├── v04_evaluation.py
+│       ├── workflow_state.py
+│       ├── adaptive_nodes.py
+│       ├── adaptive_workflow.py
+│       └── demo_adaptive_flow.py
 ├── tests/
-│   └── test_repository_ranker.py
-│   └── test_target_tool_calling.py
-│   └── test_repository_tools.py
+│   ├── test_repository_ranker.py
+│   ├── test_repository_tools.py
+│   ├── test_repository_safeguards.py
+│   ├── test_target_tool_calling.py
+│   ├── test_workflow_state.py
+│   ├── test_adaptive_nodes.py
+│   └── test_adaptive_workflow.py
 ├── pytest.ini
 ├── .env.example
 ├── .gitignore

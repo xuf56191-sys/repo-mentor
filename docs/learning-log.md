@@ -2018,3 +2018,26 @@ R2-B 残留：对「如何被测试」类目标，
 * roadmap_generator / prompt_experiment / repository_service /
   evaluation_runner / model_demo 存在裸 import 或 src. 前缀，
   已修前两者，其余列入待清理。
+
+## 2026-08-16：连接基础工作流（V0.6 自适应工作流第三步）
+
+### 今天的目标
+
+学习 START/END、add_node、add_edge、compile、invoke，
+把四个核心节点组装成可复用的基础图。
+
+### 今天完成
+
+* 学习 LangGraph 图 API：图不是顺序调用，支持分支/循环/路由；
+* 新建 adaptive_workflow.py：
+  build_adaptive_graph() + run_adaptive_workflow()；
+* 一次 invoke 返回结构化 LearningRoadmap（含类型校验）；
+* 图结构测试：节点齐全、边顺序与流程图一致；
+* 整合测试：monkeypatch 打桩后整图跑通；
+* （可选）真实 LLM 一次 invoke 验证；
+* 提交 feat: build adaptive roadmap graph。
+
+### 1. 图 vs 顺序调用
+
+* 顺序调用写死流程；图把流程变成可组合、可动态决策的结构；
+* 后面信息不足路由、证据循环都在此基础上加。
