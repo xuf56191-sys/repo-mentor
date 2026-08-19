@@ -14,6 +14,8 @@ from repo_mentor.adaptive_nodes import (
     analyze_target,
     collect_evidence,
     generate_roadmap,
+    inspect_request,
+    request_clarification,
 )
 
 
@@ -133,3 +135,50 @@ def test_generate_roadmap(monkeypatch):
     assert update["roadmap"] == "fake roadmap"
     assert captured["readme"] == "这是 README 正文"  # 参数正确透传
     assert captured["tree"] == "demo_repo/  README.md"
+
+
+def test_inspect_request_reports_missing_daily_hours():
+    """缺少时间时返回具体问题，不创建严格模型。"""
+    learner_input = make_learner().model_dump(mode="json")
+    learner_input.pop("daily_hours")
+
+    result = inspect_request({
+        "learner_input": learner_input,
+        "target_input": make_target().model_dump(mode="json"),
+    })
+
+    assert result["missing_fields"] == [
+        "learner_input.daily_hours"
+    ]
+    assert result["clarification_questions"] == [
+        "请提供每天可投入的学习时间（小时数）。"
+    ]
+    assert "learner_profile" not in result
+    assert "target_task" not in result
+
+
+def test_inspect_request_builds_validated_models():
+    """信息完整时清空缺失项，并创建严格领域模型。"""
+    result = inspect_request({
+        "learner_input": make_learner().model_dump(mode="json"),
+        "target_input": make_target().model_dump(mode="json"),
+    })
+
+    assert result["missing_fields"] == []
+    assert result["clarification_questions"] == []
+    assert isinstance(result["learner_profile"], LearnerProfile)
+    assert isinstance(result["target_task"], TargetTask)
+
+
+def test_request_clarification_handles_missing_evidence():
+    """证据为空时返回可执行的具体澄清问题。"""
+    result = request_clarification({
+        "missing_fields": [],
+        "clarification_questions": [],
+    })
+
+    assert result["missing_fields"] == ["repo_evidence"]
+    assert result["clarification_questions"] == [
+        "当前仓库证据不足，请提供更具体的目标文件、"
+        "模块名称或 Issue 信息。"
+    ]

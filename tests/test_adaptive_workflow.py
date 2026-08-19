@@ -13,6 +13,8 @@ from repo_mentor.models import (
 from repo_mentor.adaptive_workflow import (
     build_adaptive_graph,
     run_adaptive_workflow,
+    route_after_request,
+    route_after_evidence,
 )
 
 
@@ -97,17 +99,22 @@ def test_graph_has_expected_nodes():
     # graph.nodes 是 dict，迭代得到节点 id（含虚拟 __start__/__end__）
     node_ids = set(graph.nodes)
     assert {
+        "inspect_request",
+        "request_clarification",
         "analyze_learner",
         "analyze_target",
         "collect_evidence",
-        "generate_roadmap"
+        "generate_roadmap",
     } <= node_ids
 
     # 边必须按流程图顺序连接
     edges = {(e.source,e.target) for e in graph.edges}
-    assert ("analyze_learner","analyze_target") in edges
+    assert ("inspect_request", "analyze_learner") in edges
+    assert ("inspect_request", "request_clarification") in edges
+    assert ("analyze_learner", "analyze_target") in edges
     assert ("analyze_target", "collect_evidence") in edges
     assert ("collect_evidence", "generate_roadmap") in edges
+    assert ("collect_evidence", "request_clarification") in edges
 
 def test_run_adaptive_workflow_returns_roadmap(
         monkeypatch,
@@ -130,3 +137,80 @@ def test_run_adaptive_workflow_returns_roadmap(
 
     assert isinstance(roadmap, LearningRoadmap)
     assert roadmap.daily_plans[0].tasks[0].title == "理解目录树扫描"
+
+
+def test_route_after_request_chooses_correct_branch():
+    assert route_after_request({
+        "missing_fields": ["learner_input.daily_hours"],
+    }) == "needs_clarification"
+
+    assert route_after_request({
+        "missing_fields": [],
+    }) == "ready"
+
+
+def test_route_after_evidence_chooses_correct_branch():
+    assert route_after_evidence({
+        "repo_evidence": [],
+    }) == "needs_clarification"
+
+    assert route_after_evidence({
+        "repo_evidence": [object()],
+    }) == "enough_evidence"
+
+
+def test_graph_routes_missing_time_to_clarification():
+    learner_input = make_learner().model_dump(mode="json")
+    learner_input.pop("daily_hours")
+
+    result = build_adaptive_graph().invoke({
+        "learner_input": learner_input,
+        "target_input": make_target().model_dump(mode="json"),
+        "repository_path": "not-used",
+        "repo_evidence": [],
+        "messages": [],
+        "errors": [],
+        "step_count": 0,
+    })
+
+    assert result["missing_fields"] == [
+        "learner_input.daily_hours"
+    ]
+    assert result["clarification_questions"] == [
+        "请提供每天可投入的学习时间（小时数）。"
+    ]
+    assert "roadmap" not in result
+
+
+def test_graph_routes_empty_evidence_to_clarification(
+    monkeypatch,
+):
+    def fake_empty_evidence(state):
+        return {
+            "repo_evidence": [],
+            "repo_readme": "",
+            "repo_tree": "",
+        }
+
+    monkeypatch.setattr(
+        adaptive_nodes,
+        "collect_evidence",
+        fake_empty_evidence,
+    )
+
+    result = build_adaptive_graph().invoke({
+        "learner_input": make_learner().model_dump(mode="json"),
+        "target_input": make_target().model_dump(mode="json"),
+        "repository_path": "not-used",
+        "repo_evidence": [],
+        "messages": [],
+        "errors": [],
+        "step_count": 0,
+    })
+
+    assert result["missing_fields"] == ["repo_evidence"]
+    assert result["clarification_questions"] == [
+        "当前仓库证据不足，请提供更具体的目标文件、"
+        "模块名称或 Issue 信息。"
+    ]
+    assert "roadmap" not in result

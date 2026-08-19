@@ -8,9 +8,6 @@
 
 from __future__ import annotations
 
-
-
-
 import operator
 from typing import Annotated, Any, TypedDict
 
@@ -29,8 +26,12 @@ class AgentState(TypedDict, total=False):
     """所有节点共享的状态。字段均为可选，从空 dict 起步。"""
 
     # ---------- 输入 ----------
-    learner_profile: LearnerProfile          # 产生: analyze_learner/用户; 消费: generate_roadmap 等
-    target_task: TargetTask                  # 产生: analyze_target/用户; 消费: collect_evidence 等
+    # 产生：inspect_request；消费：analyze_learner、generate_roadmap
+    learner_profile: LearnerProfile
+    # 产生：inspect_request；消费：analyze_target、collect_evidence、generate_roadmap
+    target_task: TargetTask
+    learner_input: dict[str, Any]  # 产生：调用方；消费：inspect_request
+    target_input: dict[str, Any]  # 产生：调用方；消费：inspect_request
 
     # ---------- 证据 ----------
     repo_evidence: Annotated[
@@ -48,6 +49,9 @@ class AgentState(TypedDict, total=False):
     messages: Annotated[list, add_messages]  # 产生/消费: 所有节点, LLM 对话历史
     errors: Annotated[list[str], operator.add]  # 产生: 任意节点捕获的错误
     step_count: int                          # 产生: 每个节点自增; 消费: 终止条件
+    # 产生：inspect_request/证据检查；消费：路由函数
+    missing_fields: list[str]
+    clarification_questions: list[str]  # 产生：inspect_request；消费：request_clarification
 
     repository_path: str  # 产生: 用户输入; 消费: collect_evidence
     learner_analysis: dict[str, Any]  # 产生: analyze_learner; 消费: generate_roadmap
@@ -68,8 +72,6 @@ def create_initial_state(
         "errors":[],
         "step_count":0,
     }
-
-
 def validate_state_no_secrets(state:Any)->bool:
     """递归检查 State 中是否有敏感字段名。
 

@@ -1,11 +1,13 @@
-"""V0.6 自适应工作流的四个核心节点。
+"""V0.6 自适应工作流的核心节点。
 
 每个节点 = 函数(state) -> 局部更新 dict，LangGraph 负责 merge：
 
-- analyze_learner  ：分析学习者画像（纯规则，无 LLM）
-- analyze_target   ：分析目标任务关键词（纯规则）
-- collect_evidence ：收集目标相关证据（复用 V0.4 证据层）
-- generate_roadmap ：调用 LLM 生成学习路线（唯一需要 LLM 的节点）
+- inspect_request       ：检查原始输入并构造严格领域模型
+- request_clarification ：生成具体的澄清问题（纯规则，无 LLM）
+- analyze_learner       ：分析学习者画像（纯规则，无 LLM）
+- analyze_target        ：分析目标任务关键词（纯规则）
+- collect_evidence      ：收集目标相关证据（复用 V0.4 证据层）
+- generate_roadmap      ：调用 LLM 生成学习路线（唯一需要 LLM 的节点）
 
 节点间接力：analyze_learner / analyze_target 的中间产物
 → collect_evidence 收集证据 → generate_roadmap 产出路线。
@@ -13,7 +15,11 @@
 
 from __future__ import annotations
 
-from repo_mentor.models import RepositoryEvidence
+from repo_mentor.models import (
+    LearnerProfile,
+    RepositoryEvidence,
+    TargetTask,
+)
 from repo_mentor.repository_ranker import (
     extract_target_keywords,  # 从目标任务提取文件路径关键词
     rank_target_files,        # V0.4 目标相关文件排序
@@ -28,7 +34,134 @@ from repo_mentor.roadmap_generator import (
 from repo_mentor.workflow_state import AgentState  # 共享状态定义
 
 
-# ---------------- 节点 1：分析学习者（纯规则，无 LLM） ----------------
+# ---------------- 节点 1：检查原始请求信息（纯规则，无 LLM） ----------------
+
+def inspect_request(state: AgentState) -> dict:
+    """检查原始输入；信息完整时转换为严格领域模型。"""
+    learner_input = state.get("learner_input") or {}
+    target_input = state.get("target_input") or {}
+
+    missing_fields: list[str] = []
+    clarification_questions: list[str] = []
+
+    # 先安全读取并清理文本字段
+    current_level = str(
+        learner_input.get("current_level") or ""
+    ).strip()
+
+    learning_goal = str(
+        learner_input.get("learning_goal") or ""
+    ).strip()
+
+    title = str(
+        target_input.get("title") or ""
+    ).strip()
+
+    description = str(
+        target_input.get("description") or ""
+    ).strip()
+
+    task_type = str(
+        target_input.get("task_type") or ""
+    ).strip()
+
+    expected_outcome = str(
+        target_input.get("expected_outcome") or ""
+    ).strip()
+
+    # 检查学习者信息
+    if len(current_level) < 2:
+        missing_fields.append("learner_input.current_level")
+        clarification_questions.append(
+            "请说明你当前的技术水平。"
+        )
+
+    if len(learning_goal) < 2:
+        missing_fields.append("learner_input.learning_goal")
+        clarification_questions.append(
+            "请提供具体的学习目标（至少两个字符）。"
+        )
+
+    if learner_input.get("daily_hours") is None:
+        missing_fields.append("learner_input.daily_hours")
+        clarification_questions.append(
+            "请提供每天可投入的学习时间（小时数）。"
+        )
+
+    if learner_input.get("available_days") is None:
+        missing_fields.append("learner_input.available_days")
+        clarification_questions.append(
+            "请提供计划学习的天数。"
+        )
+
+    # 检查目标任务信息
+    if len(title) < 2:
+        missing_fields.append("target_input.title")
+        clarification_questions.append(
+            "请提供任务标题（至少两个字符）。"
+        )
+
+    if len(description) < 5:
+        missing_fields.append("target_input.description")
+        clarification_questions.append(
+            "请提供更详细的任务描述（至少五个字符）。"
+        )
+
+    if not task_type:
+        missing_fields.append("target_input.task_type")
+        clarification_questions.append(
+            "请选择目标任务类型。"
+        )
+
+    if len(expected_outcome) < 5:
+        missing_fields.append("target_input.expected_outcome")
+        clarification_questions.append(
+            "请明确预期结果（至少五个字符）。"
+        )
+
+    # 信息不足：不构造严格模型，交给条件路由处理
+    if missing_fields:
+        return {
+            "missing_fields": missing_fields,
+            "clarification_questions": clarification_questions,
+        }
+
+    # 信息完整：转换成后续业务节点需要的严格模型
+    return {
+        "missing_fields": [],
+        "clarification_questions": [],
+        "learner_profile": LearnerProfile.model_validate(
+            learner_input
+        ),
+        "target_task": TargetTask.model_validate(
+            target_input
+        ),
+    }
+
+
+# ---------------- 节点 2：请求用户补充具体信息（纯规则，无 LLM） ----------------
+
+def request_clarification(state: AgentState) -> dict:
+    """返回具体澄清问题，不调用 LLM。"""
+    missing_fields = list(state.get("missing_fields") or [])
+    questions = list(state.get("clarification_questions") or [])
+
+    # 输入检查已经产生问题时，直接保留。
+    # 没有输入问题却进入本节点，说明仓库证据不足。
+    if not missing_fields:
+        missing_fields.append("repo_evidence")
+        questions.append(
+            "当前仓库证据不足，请提供更具体的目标文件、"
+            "模块名称或 Issue 信息。"
+        )
+
+    return {
+        "missing_fields": missing_fields,
+        "clarification_questions": questions,
+    }
+
+
+# ---------------- 节点 3：分析学习者（纯规则，无 LLM） ----------------
 
 def analyze_learner(state: AgentState) -> dict:
     """读取 learner_profile，产出能力总结与技能差距。"""
@@ -52,8 +185,7 @@ def analyze_learner(state: AgentState) -> dict:
         }
     }
 
-
-# ---------------- 节点 2：分析目标（纯规则，复用现有工具） ----------------
+# ---------------- 节点 4：分析目标（纯规则，复用现有工具） ----------------
 
 def analyze_target(state: AgentState) -> dict:
     """读取 target_task，提炼用于文件匹配的关键词。"""
@@ -70,7 +202,7 @@ def analyze_target(state: AgentState) -> dict:
     }
 
 
-# ---------------- 节点 3：收集证据（复用 V0.4 证据层） ----------------
+# ---------------- 节点 5：收集证据（复用 V0.4 证据层） ----------------
 
 def collect_evidence(state: AgentState) -> dict:
     """根据目标收集仓库证据，并顺带取回 README 与目录树。"""
@@ -101,7 +233,7 @@ def collect_evidence(state: AgentState) -> dict:
     }
 
 
-# ---------------- 节点 4：生成路线（唯一调 LLM 的节点） ----------------
+# ---------------- 节点 6：生成路线（唯一调 LLM 的节点） ----------------
 
 def generate_roadmap(state: AgentState) -> dict:
     """调用现有路线生成器，产出 LearningRoadmap。"""
