@@ -2061,3 +2061,164 @@ R2-B 残留：对「如何被测试」类目标，
 节点负责产生状态，路由函数只根据状态选择下一步。同一源节点
 不应同时使用固定边和条件边。需要澄清的信息不是系统错误，
 因此使用独立的 missing_fields 和 clarification_questions 保存。
+
+---
+
+## 2026-08-18：有限证据补充循环
+
+### 今天的目标
+
+学习 LangGraph 循环、递归上限、证据读取预算和停止条件，
+让工作流在仓库证据不足时最多补读两个候选文件，
+并在证据充分或达到限制时可预测地结束，不出现无限循环或无目的仓库读取。
+
+### 今天完成
+
+* 为 `AgentState` 增加 `max_steps`、`evidence_budget`、
+  `evidence_candidates`、`read_evidence_files` 和
+  `evidence_stop_reason`；
+* 在 `create_initial_state()` 中设置 `max_steps=2` 和
+  `EvidenceBudget(max_files=2)`；
+* 证明每次运行都会创建独立的预算与列表对象，
+  不会在多个 State 之间共享可变数据；
+* 让 `collect_evidence` 返回排序后且去重的候选文件路径；
+* 新增 `read_more_evidence` 节点，每轮只补读一个未尝试候选文件；
+* 使用 `dataclasses.replace()` 复制 `EvidenceBudget`，
+  避免原地修改旧 State 中的可变对象；
+* 将“路径匹配证据”和“真实源码内容证据”分开，
+  只有非空 `RepositoryEvidence.snippet` 才能进入路线生成分支；
+* 将 `route_after_evidence` 升级为
+  `enough_evidence` / `read_more` / `stop` 三分支路由；
+* 新增 `conservative_evidence_stop` 节点，
+  明确返回停止原因、缺少的证据以及用户可补充的定位信息；
+* 将两个新节点接入 LangGraph，形成可终止的证据补充循环；
+* 在生产工作流入口设置 `recursion_limit=20`，
+  作为图整体执行的第二层安全熔断；
+* 更新 README 中的 V0.6 工作流、运行时状态、
+  测试覆盖和后续计划；
+* 完整测试集共 52 个测试，全部通过。
+
+### 1. LangGraph 有限循环
+
+本次循环不是用 Python `while` 实现，
+而是让补读节点执行后再次进入条件路由：
+
+```text
+collect_evidence
+→ route_after_evidence
+  ├─ enough_evidence → generate_roadmap → END
+  ├─ read_more → read_more_evidence ─┐
+  │                                  └→ route_after_evidence
+  └─ stop → conservative_evidence_stop → END
+```
+
+每次 `read_more_evidence` 只处理一个候选文件，
+然后把最新 State 交给路由函数。
+路由函数根据证据、步数、预算和未读候选文件决定是否继续。
+
+### 2. 循环状态的职责划分
+
+* `step_count`：已经发起的补读尝试数，文件读取失败也要计数；
+* `max_steps`：业务允许的最大补读次数，当前固定为 2；
+* `evidence_budget`：限制成功进入 State 的文件数和字符数；
+* `evidence_candidates`：排序后可供补读的候选文件；
+* `read_evidence_files`：记录已尝试文件，防止重复读取；
+* `evidence_stop_reason`：把预算、步数或候选文件耗尽的原因
+  传递给保守停止节点。
+
+`step_count` 和 `EvidenceBudget` 的意义不同。
+读取失败会增加 `step_count`，但不消耗成功读取预算；
+读取成功并将内容加入 State 时才更新 `EvidenceBudget`。
+
+### 3. 路由判断顺序
+
+`route_after_evidence` 必须按以下顺序判断：
+
+1. 是否已经获得非空内容证据；
+2. `step_count` 是否已达到 `max_steps`；
+3. `EvidenceBudget` 是否已经停止；
+4. 是否仍有尚未读取的候选文件；
+5. 以上条件都不满足时继续补读。
+
+成功条件必须优先于停止条件。
+例如第二次补读成功时，`step_count == max_steps == 2`，
+但因为已经获得内容证据，应该进入 `generate_roadmap`，
+而不是被次数上限提前截断。
+
+### 4. 业务停止与运行时熔断
+
+* `max_steps=2` 是正常业务逻辑，
+  达到后会进入 `conservative_evidence_stop`，
+  以结构化状态说明为什么停止；
+* `recursion_limit=20` 是 LangGraph 整图的异常熔断，
+  用于防止图结构错误造成的意外循环，
+  不应用它代替业务层的停止分支。
+
+一句话：`max_steps` 负责“正常地停”，
+`recursion_limit` 负责“异常时强制熔断”。
+
+### 5. 今天踩的坑
+
+* `state.get("repo_evidence") or []` 执行后一定是列表，
+  不能再用 `is not None` 作为证据充分条件；
+* 应该判断派生出来的业务条件 `has_content_evidence`，
+  而不是只判断容器是否存在；
+* 判断补读上限要使用 `>=`，而不是 `==`，
+  避免异常状态超过上限后反而继续循环；
+* 候选文件是否耗尽应判断 `has_unread_candidate`，
+  而不是判断 `candidates is None`；
+* 可变的 `EvidenceBudget` 不能直接在 State 原对象上修改；
+* 失败读取也必须增加 `step_count`，
+  否则连续失败可能使图永远无法达到停止条件；
+* 停止原因本身已经带句号时，
+  组装问题文本不要再额外添加句号。
+
+### 6. 测试与验收
+
+今天新增或扩展的测试覆盖：
+
+* 初始状态中的有限循环默认值；
+* 两个工作流不共享预算和可变列表；
+* 候选文件生成、去重与顺序；
+* 每次只补读一个文件；
+* 跳过已尝试的候选文件；
+* 旧的 `EvidenceBudget` 对象不被原地修改；
+* 证据充分、继续补读和保守停止三条路由；
+* 步数上限、预算停止和候选文件耗尽边界；
+* 第二次获得有效证据时成功分支优先；
+* 连续读取失败时最多尝试两个文件，
+  第三个候选文件不会被读取；
+* 第二次读取成功时会退出循环并生成 `LearningRoadmap`；
+* 保守停止时会返回明确原因和仍然缺少的源码信息。
+
+最终完整测试结果：
+
+```text
+52 passed in 2.72s
+```
+
+今日验收标准全部通过：
+
+* 所有执行路径都能有限终止；
+* 最多补读两个候选文件；
+* 不会重复读取同一文件；
+* 第二次补读成功时能正常生成路线；
+* 达到上限时能说明停止原因与缺少的信息；
+* 生产工作流配置了 LangGraph 运行时安全上限。
+
+### 核心认识
+
+有限循环不是“多跑几次节点”，
+而是一套明确的状态机设计：
+
+* 节点负责读取一个文件并产生局部 State 更新；
+* 路由函数负责根据最新 State 选择下一步；
+* 业务限制负责让正常流程可解释地结束；
+* 运行时上限负责在图结构异常时熔断；
+* 测试必须证明循环不仅能继续，还能在所有边界上结束。
+
+### 下一步
+
+* 在当前有限循环上学习 LangGraph 人工确认与中断恢复；
+* 设计用户补充文件或模块信息后如何继续原工作流；
+* 将路线生成结果进一步连接到测验、掌握度评估和重新规划闭环。

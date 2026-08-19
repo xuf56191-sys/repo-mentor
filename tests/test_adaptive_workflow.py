@@ -1,5 +1,5 @@
 from pathlib import Path
-
+from repo_mentor.workflow_state import create_initial_state
 from repo_mentor import adaptive_nodes
 from repo_mentor.models import (
     DailyPlan,
@@ -8,9 +8,11 @@ from repo_mentor.models import (
     LearningRoadmap,
     LearningTask,
     TargetTask,
+    RepositoryEvidence,
 )
-
+from repo_mentor.repository_safeguards import EvidenceBudget
 from repo_mentor.adaptive_workflow import (
+    GRAPH_RECURSION_LIMIT,
     build_adaptive_graph,
     run_adaptive_workflow,
     route_after_request,
@@ -94,7 +96,7 @@ def fake_generator(
     )
 
 def test_graph_has_expected_nodes():
-    """图结构测试：4 个节点都注册了，顺序与流程图一致。"""
+    """图结构测试：8 个业务节点和有限循环均已注册。"""
     graph = build_adaptive_graph().get_graph()
     # graph.nodes 是 dict，迭代得到节点 id（含虚拟 __start__/__end__）
     node_ids = set(graph.nodes)
@@ -105,6 +107,8 @@ def test_graph_has_expected_nodes():
         "analyze_target",
         "collect_evidence",
         "generate_roadmap",
+        "read_more_evidence",
+        "conservative_evidence_stop",
     } <= node_ids
 
     # 边必须按流程图顺序连接
@@ -114,7 +118,24 @@ def test_graph_has_expected_nodes():
     assert ("analyze_learner", "analyze_target") in edges
     assert ("analyze_target", "collect_evidence") in edges
     assert ("collect_evidence", "generate_roadmap") in edges
-    assert ("collect_evidence", "request_clarification") in edges
+    assert ("collect_evidence", "read_more_evidence") in edges
+    assert (
+               "collect_evidence",
+               "conservative_evidence_stop",
+           ) in edges
+
+    assert (
+               "read_more_evidence",
+               "generate_roadmap",
+           ) in edges
+    assert (
+               "read_more_evidence",
+               "read_more_evidence",
+           ) in edges
+    assert (
+               "read_more_evidence",
+               "conservative_evidence_stop",
+           ) in edges
 
 def test_run_adaptive_workflow_returns_roadmap(
         monkeypatch,
@@ -149,14 +170,113 @@ def test_route_after_request_chooses_correct_branch():
     }) == "ready"
 
 
-def test_route_after_evidence_chooses_correct_branch():
-    assert route_after_evidence({
-        "repo_evidence": [],
-    }) == "needs_clarification"
+def make_repository_evidence(
+    snippet: str | None,
+) -> RepositoryEvidence:
+    """构造路径证据或内容证据。"""
+    return RepositoryEvidence(
+        source_path="src/repository_tree.py",
+        snippet=snippet,
+        reason="与目标模块相关。",
+        confidence=0.8,
+    )
 
-    assert route_after_evidence({
-        "repo_evidence": [object()],
-    }) == "enough_evidence"
+
+def test_route_after_evidence_prefers_success_at_step_limit():
+    """第2次补读获得内容后，应生成路线而不是停止。"""
+    state = {
+        "repo_evidence": [
+            make_repository_evidence(
+                "def build_tree():\n    return 'tree'"
+            )
+        ],
+        "step_count": 2,
+        "max_steps": 2,
+        "evidence_candidates": [],
+        "read_evidence_files": [],
+    }
+
+    assert (
+        route_after_evidence(state)
+        == "enough_evidence"
+    )
+
+
+def test_route_after_evidence_reads_more_when_allowed():
+    """只有路径证据且仍有候选文件时，继续补读。"""
+    state = {
+        "repo_evidence": [
+            make_repository_evidence(None)
+        ],
+        "step_count": 0,
+        "max_steps": 2,
+        "evidence_budget": EvidenceBudget(max_files=2),
+        "evidence_candidates": [
+            "src/repository_tree.py"
+        ],
+        "read_evidence_files": [],
+    }
+
+    assert route_after_evidence(state) == "read_more"
+
+
+def test_route_after_evidence_stops_at_step_limit():
+    """没有内容证据且达到补读上限时停止。"""
+    state = {
+        "repo_evidence": [
+            make_repository_evidence(None)
+        ],
+        "step_count": 2,
+        "max_steps": 2,
+        "evidence_candidates": [
+            "src/repository_tree.py"
+        ],
+        "read_evidence_files": [],
+    }
+
+    assert route_after_evidence(state) == "stop"
+
+
+def test_route_after_evidence_stops_when_budget_stopped():
+    """预算对象已经停止时，不得继续读取。"""
+    state = {
+        "repo_evidence": [
+            make_repository_evidence(None)
+        ],
+        "step_count": 0,
+        "max_steps": 2,
+        "evidence_budget": EvidenceBudget(
+            max_files=2,
+            stopped=True,
+            stop_reason="文件读取预算已耗尽。",
+        ),
+        "evidence_candidates": [
+            "src/repository_tree.py"
+        ],
+        "read_evidence_files": [],
+    }
+
+    assert route_after_evidence(state) == "stop"
+
+
+def test_route_after_evidence_stops_without_unread_candidates():
+    """所有候选文件都尝试过后必须停止。"""
+    state = {
+        "repo_evidence": [
+            make_repository_evidence(None)
+        ],
+        "step_count": 1,
+        "max_steps": 2,
+        "evidence_budget": EvidenceBudget(max_files=2),
+        "evidence_candidates": [
+            "src/repository_tree.py"
+        ],
+        "read_evidence_files": [
+            "src/repository_tree.py"
+        ],
+    }
+
+    assert route_after_evidence(state) == "stop"
 
 
 def test_graph_routes_missing_time_to_clarification():
@@ -182,7 +302,7 @@ def test_graph_routes_missing_time_to_clarification():
     assert "roadmap" not in result
 
 
-def test_graph_routes_empty_evidence_to_clarification(
+def test_graph_routes_empty_evidence_to_conservative_stop(
     monkeypatch,
 ):
     def fake_empty_evidence(state):
@@ -209,8 +329,215 @@ def test_graph_routes_empty_evidence_to_clarification(
     })
 
     assert result["missing_fields"] == ["repo_evidence"]
-    assert result["clarification_questions"] == [
-        "当前仓库证据不足，请提供更具体的目标文件、"
-        "模块名称或 Issue 信息。"
-    ]
+    assert result["evidence_stop_reason"] == (
+        "没有尚未读取的候选文件。"
+    )
+
+    question = result["clarification_questions"][0]
+    assert "证据补充已停止" in question
+    assert "没有尚未读取的候选文件" in question
+    assert "源码内容" in question
     assert "roadmap" not in result
+
+def test_bounded_evidence_loop_stops_after_two_failed_reads(
+    monkeypatch,
+    tmp_path: Path,
+):
+    """连续读取失败时，循环最多执行 max_steps 次。"""
+    candidates = [
+        "src/a.py",
+        "src/b.py",
+        "src/c.py",
+    ]
+    read_calls: list[str] = []
+
+    def fake_collect_evidence(state):
+        """只返回路径证据，不返回源码内容。"""
+        return {
+            "repo_evidence": [
+                RepositoryEvidence(
+                    source_path="src/a.py",
+                    snippet=None,
+                    reason="候选文件路径与目标相关。",
+                    confidence=0.7,
+                )
+            ],
+            "repo_readme": "",
+            "repo_tree": "",
+            "evidence_candidates": candidates,
+        }
+
+    class AlwaysFailingReadTool:
+        """记录读取路径，并模拟所有文件读取失败。"""
+
+        def invoke(self, arguments):
+            relative_path = arguments["relative_path"]
+            read_calls.append(relative_path)
+
+            return {
+                "ok": False,
+                "error_type": "file_not_found",
+                "message": f"无法读取 {relative_path}",
+            }
+
+    monkeypatch.setattr(
+        adaptive_nodes,
+        "collect_evidence",
+        fake_collect_evidence,
+    )
+    monkeypatch.setattr(
+        adaptive_nodes,
+        "read_repo_file",
+        AlwaysFailingReadTool(),
+    )
+
+    initial = create_initial_state(
+        make_learner(),
+        make_target(),
+    )
+    initial.update({
+        "learner_input": (
+            make_learner().model_dump(mode="json")
+        ),
+        "target_input": (
+            make_target().model_dump(mode="json")
+        ),
+        "repository_path": str(tmp_path),
+    })
+
+    result = build_adaptive_graph().invoke(initial)
+
+    # 最核心的有限循环断言：
+    # 即使有三个候选文件，也只能读取前两个。
+    assert read_calls == [
+        "src/a.py",
+        "src/b.py",
+    ]
+    assert "src/c.py" not in read_calls
+
+    assert result["step_count"] == 2
+    assert result["read_evidence_files"] == [
+        "src/a.py",
+        "src/b.py",
+    ]
+
+    # 读取失败不消耗“成功读取文件”预算。
+    assert result["evidence_budget"].used_files == 0
+
+    assert result["evidence_stop_reason"] == (
+        "已达到最多 2 次证据补读上限。"
+    )
+    assert result["missing_fields"] == ["repo_evidence"]
+    assert "roadmap" not in result
+
+    # 两次失败都通过 errors reducer 累积下来。
+    assert len(result["errors"]) == 2
+
+def test_evidence_loop_finishes_when_second_read_succeeds(
+    monkeypatch,
+    tmp_path: Path,
+):
+    """第二次补读成功时，应退出循环并生成路线。"""
+    candidates = [
+        "src/a.py",
+        "src/b.py",
+        "src/c.py",
+    ]
+    read_calls: list[str] = []
+
+    def fake_collect_evidence(state):
+        return {
+            "repo_evidence": [
+                RepositoryEvidence(
+                    source_path="src/a.py",
+                    snippet=None,
+                    reason="候选文件路径与目标相关。",
+                    confidence=0.7,
+                )
+            ],
+            "repo_readme": "",
+            "repo_tree": "",
+            "evidence_candidates": candidates,
+        }
+
+    class SecondReadSucceedsTool:
+        """第一次失败，第二次返回真实内容证据。"""
+
+        def invoke(self, arguments):
+            relative_path = arguments["relative_path"]
+            read_calls.append(relative_path)
+
+            if len(read_calls) == 1:
+                return {
+                    "ok": False,
+                    "error_type": "file_not_found",
+                    "message": f"无法读取 {relative_path}",
+                }
+
+            return {
+                "ok": True,
+                "source_path": relative_path,
+                "size_bytes": 40,
+                "content": (
+                    "def build_tree():\n"
+                    "    return 'tree'\n"
+                ),
+            }
+
+    monkeypatch.setattr(
+        adaptive_nodes,
+        "collect_evidence",
+        fake_collect_evidence,
+    )
+    monkeypatch.setattr(
+        adaptive_nodes,
+        "read_repo_file",
+        SecondReadSucceedsTool(),
+    )
+    monkeypatch.setattr(
+        adaptive_nodes,
+        "generate_structured_roadmap",
+        fake_generator,
+    )
+
+    initial = create_initial_state(
+        make_learner(),
+        make_target(),
+    )
+    initial.update({
+        "learner_input": (
+            make_learner().model_dump(mode="json")
+        ),
+        "target_input": (
+            make_target().model_dump(mode="json")
+        ),
+        "repository_path": str(tmp_path),
+    })
+
+    result = build_adaptive_graph().invoke(initial)
+
+    assert read_calls == [
+        "src/a.py",
+        "src/b.py",
+    ]
+    assert "src/c.py" not in read_calls
+
+    assert result["step_count"] == 2
+    assert result["read_evidence_files"] == [
+        "src/a.py",
+        "src/b.py",
+    ]
+
+    # 第一次失败不消耗预算，第二次成功消耗一个文件预算。
+    assert result["evidence_budget"].used_files == 1
+
+    # 新增证据中必须包含真正读取到的源码。
+    assert any(
+        evidence.snippet
+        and "def build_tree" in evidence.snippet
+        for evidence in result["repo_evidence"]
+    )
+
+    assert len(result["errors"]) == 1
+    assert isinstance(result["roadmap"], LearningRoadmap)
+    assert result["missing_fields"] == []

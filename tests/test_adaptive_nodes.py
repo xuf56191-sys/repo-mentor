@@ -7,7 +7,7 @@
 """
 
 from pathlib import Path
-
+from repo_mentor.repository_safeguards import EvidenceBudget
 from repo_mentor.models import LearnerProfile, TargetTask
 from repo_mentor.adaptive_nodes import (
     analyze_learner,
@@ -16,6 +16,8 @@ from repo_mentor.adaptive_nodes import (
     generate_roadmap,
     inspect_request,
     request_clarification,
+    read_more_evidence,
+    conservative_evidence_stop,
 )
 
 
@@ -97,6 +99,14 @@ def test_collect_evidence(tmp_path: Path):
     assert len(update["repo_evidence"]) > 0
     assert update["repo_readme"]  # 非空
     assert "README.md" in update["repo_tree"]
+    assert update["evidence_candidates"]
+    assert (
+            "src/repository_tree.py"
+            in update["evidence_candidates"]
+    )
+    assert len(update["evidence_candidates"]) == len(
+        set(update["evidence_candidates"])
+    )
 
 
 # ---------------- 节点 4：generate_roadmap（monkeypatch 打桩） ----------------
@@ -182,3 +192,114 @@ def test_request_clarification_handles_missing_evidence():
         "当前仓库证据不足，请提供更具体的目标文件、"
         "模块名称或 Issue 信息。"
     ]
+
+
+# ---------------- 节点 6：read_more_evidence ----------------
+
+def test_read_more_evidence_adds_one_evidence_without_mutating_old_budget(
+    tmp_path: Path,
+):
+    """每次只补读一个文件，并且不原地修改旧预算。"""
+    repo = make_mini_repo(tmp_path)
+    original_budget = EvidenceBudget(
+        max_files=2,
+        max_chars=30_000,
+    )
+
+    state = {
+        "repository_path": str(repo),
+        "evidence_candidates": [
+            "src/repository_tree.py",
+            "README.md",
+        ],
+        "read_evidence_files": [],
+        "step_count": 0,
+        "evidence_budget": original_budget,
+    }
+
+    update = read_more_evidence(state)
+
+    assert update["step_count"] == 1
+    assert update["read_evidence_files"] == [
+        "src/repository_tree.py"
+    ]
+    assert len(update["repo_evidence"]) == 1
+    assert (
+        update["repo_evidence"][0].source_path
+        == "src/repository_tree.py"
+    )
+
+    # 旧预算不能被节点原地修改
+    assert original_budget.used_files == 0
+    assert update["evidence_budget"] is not original_budget
+    assert update["evidence_budget"].used_files == 1
+
+
+def test_read_more_evidence_skips_attempted_file(
+    tmp_path: Path,
+):
+    """已经尝试过的文件必须跳过，不能重复读取。"""
+    repo = make_mini_repo(tmp_path)
+    budget = EvidenceBudget(
+        max_files=2,
+        max_chars=30_000,
+        used_files=1,
+        used_chars=20,
+    )
+
+    state = {
+        "repository_path": str(repo),
+        "evidence_candidates": [
+            "src/repository_tree.py",
+            "README.md",
+        ],
+        "read_evidence_files": [
+            "src/repository_tree.py"
+        ],
+        "step_count": 1,
+        "evidence_budget": budget,
+    }
+
+    update = read_more_evidence(state)
+
+    assert update["step_count"] == 2
+    assert update["read_evidence_files"] == [
+        "src/repository_tree.py",
+        "README.md",
+    ]
+    assert update["repo_evidence"][0].source_path == "README.md"
+    assert update["evidence_budget"].used_files == 2
+
+# ---------------- 节点 7：conservative_evidence_stop ----------------
+
+def test_conservative_evidence_stop_reports_step_limit():
+    """达到补读次数上限时，明确说明停止原因和缺少内容。"""
+    result = conservative_evidence_stop({
+        "step_count": 2,
+        "max_steps": 2,
+        "evidence_budget": EvidenceBudget(max_files=2),
+        "evidence_stop_reason": None,
+    })
+
+    assert result["evidence_stop_reason"] == (
+        "已达到最多 2 次证据补读上限。"
+    )
+    assert result["missing_fields"] == ["repo_evidence"]
+    assert "源码内容" in result["clarification_questions"][0]
+
+
+def test_conservative_evidence_stop_preserves_specific_reason():
+    """补读节点产生的具体停止原因应优先保留。"""
+    result = conservative_evidence_stop({
+        "step_count": 1,
+        "max_steps": 2,
+        "evidence_stop_reason": "文件内容超过剩余字符预算。",
+    })
+
+    assert result["evidence_stop_reason"] == (
+        "文件内容超过剩余字符预算。"
+    )
+    assert (
+        "文件内容超过剩余字符预算"
+        in result["clarification_questions"][0]
+    )

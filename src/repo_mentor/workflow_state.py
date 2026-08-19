@@ -12,15 +12,16 @@ import operator
 from typing import Annotated, Any, TypedDict
 
 from langgraph.graph.message import add_messages
-
+from repo_mentor.repository_safeguards import (
+    EvidenceBudget,
+    SENSITIVE_KEYWORDS,
+)
 from repo_mentor.models import (
     LearnerProfile,
     LearningRoadmap,
     RepositoryEvidence,
     TargetTask,
 )
-from repo_mentor.repository_safeguards import SENSITIVE_KEYWORDS
-
 
 class AgentState(TypedDict, total=False):
     """所有节点共享的状态。字段均为可选，从空 dict 起步。"""
@@ -48,7 +49,7 @@ class AgentState(TypedDict, total=False):
     # ---------- 运行时 ----------
     messages: Annotated[list, add_messages]  # 产生/消费: 所有节点, LLM 对话历史
     errors: Annotated[list[str], operator.add]  # 产生: 任意节点捕获的错误
-    step_count: int                          # 产生: 每个节点自增; 消费: 终止条件
+    step_count: int                          # 产生：read_more_evidence；消费：有限循环路由
     # 产生：inspect_request/证据检查；消费：路由函数
     missing_fields: list[str]
     clarification_questions: list[str]  # 产生：inspect_request；消费：request_clarification
@@ -58,6 +59,13 @@ class AgentState(TypedDict, total=False):
     target_analysis: dict[str, Any]  # 产生: analyze_target; 消费: collect_evidence
     repo_readme: str  # 产生: collect_evidence; 消费: generate_roadmap
     repo_tree: str  # 产生: collect_evidence; 消费: generate_roadmap
+    max_steps: int  # 产生：create_initial_state；消费：有限循环路由
+    evidence_budget: EvidenceBudget    # 产生：create_initial_state/read_more_evidence；消费：补读节点和路由
+
+    evidence_candidates: list[str]
+    read_evidence_files: list[str]
+    evidence_stop_reason: str | None
+
 
 def create_initial_state(
         learner_profile:LearnerProfile,
@@ -70,8 +78,17 @@ def create_initial_state(
         "repo_evidence":[],
         "messages":[],
         "errors":[],
-        "step_count":0,
+        "step_count": 0,
+        "max_steps": 2,
+        "evidence_budget": EvidenceBudget(
+            max_files=2,
+        ),
+        "evidence_candidates": [],
+        "read_evidence_files": [],
+        "evidence_stop_reason": None,
     }
+
+
 def validate_state_no_secrets(state:Any)->bool:
     """递归检查 State 中是否有敏感字段名。
 
@@ -110,3 +127,10 @@ def validate_state_no_secrets(state:Any)->bool:
 # | target_analysis | analyze_target      | collect_evidence                |
 # | repo_readme     | collect_evidence    | generate_roadmap                |
 # | repo_tree       | collect_evidence    | generate_roadmap                |
+# | 字段                      | 职责 |
+#| `step_count` | 已尝试多少次补充读取，包括失败读取 |
+#| `max_steps` | 最多允许多少次补充读取，今天固定为 2 |
+#| `evidence_budget` | 限制成功读取的文件数和字符数 |
+#| `evidence_candidates` | 排序后尚可选择的候选文件路径 |
+#| `read_evidence_files` | 已尝试读取的文件路径，防止重复读取 |
+#| `evidence_stop_reason` | 保守停止时向用户解释原因 |

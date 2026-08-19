@@ -14,7 +14,8 @@
 """
 
 from __future__ import annotations
-
+from dataclasses import replace
+from repo_mentor.repository_tools import read_repo_file
 from repo_mentor.models import (
     LearnerProfile,
     RepositoryEvidence,
@@ -221,19 +222,186 @@ def collect_evidence(state: AgentState) -> dict:
 
     # 3.3 目标相关文件排序 -> 展平为证据列表
     ranked = rank_target_files(path, target, top_n=8)
+
+    evidence_candidates = [
+        item.file_path
+        for item in ranked
+    ]
     evidence: list[RepositoryEvidence] = []
     for item in ranked:
         # 每个候选文件自带 evidence（README 引用等），展平收集
         evidence.extend(item.evidence)
 
     return {
-        "repo_evidence": evidence,          # 给 generate_roadmap 用
-        "repo_readme": readme,              # 路线生成需要 README 文本
-        "repo_tree": tree_result.tree,      # 路线生成需要目录树文本
+        "repo_evidence": evidence,
+        "repo_readme": readme,
+        "repo_tree": tree_result.tree,
+        "evidence_candidates": evidence_candidates,
     }
 
 
-# ---------------- 节点 6：生成路线（唯一调 LLM 的节点） ----------------
+# ---------------- 节点 6：补读一个候选文件（有限循环） ----------------
+
+def read_more_evidence(state: AgentState) -> dict:
+    """补读一个尚未尝试的候选文件，并安全更新证据预算。"""
+    candidates = list(
+        state.get("evidence_candidates") or []
+    )
+    attempted_files = list(
+        state.get("read_evidence_files") or []
+    )
+
+    # 从 candidates 中选择第一个不在 attempted_files 中的路径。
+    # 找不到时 next_candidate 应为 None。
+    next_candidate = next(
+        (
+            path
+            for path in candidates
+            if path not in attempted_files
+        ),
+        None,
+    )
+
+    if next_candidate is None:
+        return {
+            "evidence_stop_reason": (
+                "没有尚未读取的候选文件，"
+                "当前证据仍不足。"
+            ),
+        }
+
+    # 只要真正发起读取尝试，step_count 就增加，
+    # 即使本次文件读取失败。
+    next_step_count = state["step_count"] + 1
+    updated_attempted_files = [
+        *attempted_files,
+        next_candidate,
+    ]
+
+    result = read_repo_file.invoke({
+        "repository_path": state["repository_path"],
+        "relative_path": next_candidate,
+    })
+
+    common_update = {
+        "step_count": next_step_count,
+        "read_evidence_files": updated_attempted_files,
+    }
+
+    # 文件读取失败：记录错误，但不消耗成功读取预算。
+    if not result.get("ok"):
+        return {
+            **common_update,
+            "errors": [
+                (
+                    f"补读 {next_candidate} 失败："
+                    f"{result.get('message', '未知错误')}"
+                )
+            ],
+        }
+
+    content = str(result.get("content") or "")
+
+    # 必须复制预算，不能直接修改 State 中的旧对象。
+    updated_budget = replace(
+        state["evidence_budget"]
+    )
+
+    # 先判断本次内容是否还能进入 State。
+    if not updated_budget.can_consume(
+        file_count=1,
+        char_count=len(content),
+    ):
+        # consume 会设置 stopped 和具体 stop_reason。
+        updated_budget.consume(
+            file_count=1,
+            char_count=len(content),
+        )
+
+        return {
+            **common_update,
+            "evidence_budget": updated_budget,
+            "evidence_stop_reason": (
+                updated_budget.stop_reason
+                or "证据读取预算不足。"
+            ),
+        }
+
+    updated_budget.consume(
+        file_count=1,
+        char_count=len(content),
+    )
+
+    # 空文件消耗一次文件预算，但不能形成有效证据。
+    if not content:
+        return {
+            **common_update,
+            "evidence_budget": updated_budget,
+            "evidence_stop_reason": updated_budget.stop_reason,
+            "errors": [
+                f"补读 {next_candidate} 成功，但文件内容为空。"
+            ],
+        }
+
+    evidence = RepositoryEvidence(
+        source_path=result["source_path"],
+        snippet=content,
+        reason="有限循环补读的目标相关候选文件。",
+        confidence=1.0,
+    )
+
+    # repo_evidence 有 operator.add reducer，
+    # 因此这里只返回本轮新增的一条证据。
+    return {
+        **common_update,
+        "evidence_budget": updated_budget,
+        "repo_evidence": [evidence],
+        "evidence_stop_reason": updated_budget.stop_reason,
+    }
+
+
+# ---------------- 节点 7：证据不足时保守停止（纯规则） ----------------
+
+def conservative_evidence_stop(
+    state: AgentState,
+) -> dict:
+    """说明停止原因，并请求更具体的仓库定位信息。"""
+    reason = state.get("evidence_stop_reason")
+    budget = state.get("evidence_budget")
+
+    # 如果 reason 为空、budget 存在且 budget.stop_reason 非空，
+    # 使用预算对象中的停止原因。
+    if not reason and budget is not None and budget.stop_reason:
+        reason = budget.stop_reason
+
+    step_count = state.get("step_count", 0)
+    max_steps = state.get("max_steps", 2)
+
+    # 如果 reason 仍为空，并且 step_count >= max_steps，
+    # 设置为：
+    # f"已达到最多 {max_steps} 次证据补读上限。"
+    if not reason and step_count >= max_steps:
+        reason = f"已达到最多 {max_steps} 次证据补读上限。"
+
+    # 如果 reason 仍为空，说明不是次数或预算问题，
+    # 设置为：
+    # "没有尚未读取的候选文件。"
+    if not reason:
+        reason = "没有尚未读取的候选文件。"
+
+    question = (
+        f"证据补充已停止：{reason}"
+        "当前仍缺少能够证明目标实现位置的源码内容，"
+        "请提供更具体的目标文件、模块名称或 Issue 信息。"
+    )
+
+    return {
+        "evidence_stop_reason": reason,
+        "missing_fields": ["repo_evidence"],
+        "clarification_questions": [question],
+    }
+
+# ---------------- 节点 8：生成路线（唯一调 LLM 的节点） ----------------
 
 def generate_roadmap(state: AgentState) -> dict:
     """调用现有路线生成器，产出 LearningRoadmap。"""

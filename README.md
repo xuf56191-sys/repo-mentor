@@ -124,14 +124,31 @@ RepoMentor 当前已经完成 V0.2 个性化路线原型和 V0.4 真实仓库证
 - onboarding 资料按一个证据单元计入文件预算，
   避免一次占用多个文件名额；
 - Tool Calling 默认支持 3 轮「发现 → 排序 → 读源码」流程。
-- 定义 LangGraph 共享状态 `AgentState`（13 个字段，含 reducer 合并语义）；
+- 定义 LangGraph 共享状态 `AgentState`，
+  覆盖输入、证据、输出和运行时控制字段，并使用 reducer 管理累积语义；
 - 提供 `validate_state_no_secrets` 防止敏感信息进入状态；
-- 拆分四个单一职责节点：`analyze_learner`、`analyze_target`、
+- 拆分四个基础分析与生成节点：`analyze_learner`、`analyze_target`、
   `collect_evidence`、`generate_roadmap`；
-- 组装基础工作流图：一次 invoke 从画像和目标生成结构化
+- 组装 LangGraph 自适应工作流：成功分支中一次 invoke
+  从画像和目标生成结构化
   `LearningRoadmap`；
 - 节点与图均有单元测试，LLM 依赖通过 monkeypatch 打桩，
   测试不花钱、不联网、可重复。
+- 增加 `inspect_request` 和 `request_clarification` 节点，
+  在建立严格领域模型前检查学习者与目标输入；
+- 使用确定性条件边在“继续分析”和“请求澄清”之间路由，
+  路由函数不调用 LLM，也不修改 State；
+- 将路径匹配证据与真实源码内容证据分开，
+  只有非空 `RepositoryEvidence.snippet` 才视为内容证据；
+- 增加 `read_more_evidence` 节点和有限证据补充循环，
+  每轮只读取一个尚未尝试的候选文件；
+- 使用 `step_count`、`max_steps=2`、`EvidenceBudget`、
+  `read_evidence_files` 和 `evidence_candidates` 共同防止重复读取和无限循环；
+- 增加 `conservative_evidence_stop` 节点，达到次数上限、
+  证据预算耗尽或候选文件用尽时，明确说明停止原因和缺失信息；
+- 为生产工作流设置 LangGraph `recursion_limit=20` 作为运行时熔断保险；
+- 自适应节点、路由、成功分支、保守停止分支和有限循环均有自动化测试，
+  当前完整测试集为 **52 passed**。
 
 
 
@@ -164,16 +181,19 @@ read_repo_file
 根据真实源码总结目录树扫描流程
 ```
 
-当前正在完成：
+当前已完成：
+
 - 让模型根据具体目标自主选择 Repository Tools；
 - 记录模型产生的 tool calls、参数和调用次数；
 - 将 Tool 结果通过 ToolMessage 返回模型；
-- 限制模型无目的地读取大量无关仓库文件。
+- 通过证据预算与 LangGraph 有限循环，
+  限制无目的仓库文件读取。
 
 当前还没有完成：
 
-- 完整的 LangGraph 自适应工作流
-  （分支路由、证据补充循环、人工确认、掌握度闭环仍在后续步骤）；
+- 完整的 LangGraph 自适应闭环
+  （输入澄清分支和有限证据补充循环已完成，
+  人工确认、掌握度评估与重新规划仍在后续步骤）；
 - 代码库 RAG 问答；
 - 测验和学习进度保存；
 - Streamlit 页面。
@@ -324,25 +344,50 @@ RepoMentor 会将其标记为：
 所有节点共享的状态，字段包括：
 
 - 输入：`learner_profile`、`target_task`、`repository_path`；
+- 原始输入：`learner_input`、`target_input`，
+  用于在 Pydantic 严格校验前发现缺失字段；
 - 中间产物：`learner_analysis`、`target_analysis`、`repo_evidence`、
   `repo_readme`、`repo_tree`；
 - 输出：`roadmap`、`mastery`；
 - 运行时：`messages`（`add_messages` 去重合并）、`errors`（累积）、
-  `step_count`。
+  `missing_fields`、`clarification_questions`、`step_count`、`max_steps`、
+  `evidence_budget`、`evidence_candidates`、`read_evidence_files` 和
+  `evidence_stop_reason`。
 
 State 不保存 API Key 等敏感信息，
 `validate_state_no_secrets` 只检查键名，避免把普通单词误判为密钥。
 
-### 四个核心节点
+### 八个工作流节点
 
 ```text
-analyze_learner（纯规则）
-→ analyze_target（复用目标关键词提取）
-→ collect_evidence（复用 V0.4 证据层）
-→ generate_roadmap（唯一调用 LLM）
+START
+→ inspect_request（校验原始请求）
+  ├─ 缺少字段 → request_clarification → END
+  └─ 输入完整 → analyze_learner
+                 → analyze_target
+                 → collect_evidence
+                    ├─ 内容证据充分 → generate_roadmap → END
+                    ├─ 仍可补读 → read_more_evidence ─┐
+                    │                                └→ 再次证据路由
+                    └─ 达到上限 → conservative_evidence_stop → END
 ```
 
-### 基础工作流图
+`generate_roadmap` 是当前唯一调用 LLM 的工作流节点。
+输入检查、分支决策、读取上限和停止原因都由确定性 Python 代码控制。
+
+### 条件路由与有限证据循环
+
+- `route_after_request` 只根据 `missing_fields` 返回
+  `ready` 或 `needs_clarification`；
+- `route_after_evidence` 根据内容证据、补读次数、证据预算和未读候选文件，
+  返回 `enough_evidence`、`read_more` 或 `stop`；
+- 成功条件优先于停止条件，
+  因此第二次补读获得有效证据时仍会正常生成路线；
+- `max_steps=2` 是可解释、可测试的业务停止条件；
+- `recursion_limit=20` 是 LangGraph 整体执行的第二层安全熔断，
+  不代替业务层的 `max_steps`。
+
+### 自适应工作流入口
 
 `adaptive_workflow.py` 提供：
 
@@ -368,6 +413,8 @@ analyze_learner（纯规则）
 - 当前模型可能选择“合理但非必要”的额外 Tool，
   因此后续需要进一步优化工具选择效率；
 - 当前不进行全仓库源码批量读取；
+- 当路径证据不足时，工作流最多补读两个目标相关候选文件，
+  不会扫描或批量读取整个仓库；
 - 当前不自动修改代码、不自动创建 PR。
 
 ## 当前演示效果
@@ -417,9 +464,15 @@ AI Agent 是一种能够感知环境、自主决策并采取行动以完成特�
 测试还覆盖了 V0.6 自适应工作流：
 
 - AgentState 默认值与 reducer 语义（累积/覆盖）与密钥边界；
-- 四个节点各一个独立单元测试；
-- 图结构测试（节点齐全、边顺序与流程图一致）；
-- 整合测试（monkeypatch 打桩后整图一次 invoke 产出路线）。
+- 八个工作流节点的独立行为；
+- 原始输入完整与缺失字段时的两条路由；
+- 内容证据充分、继续补读、步数达上限、预算停止和候选耗尽路由；
+- 候选文件不重复读取，且旧的 `EvidenceBudget` 对象不被原地修改；
+- 连续读取失败时最多尝试两个文件，第三个候选文件不会被读取；
+- 第二次读取成功时能退出循环并产出结构化路线；
+- 保守停止时会返回停止原因和仍然缺失的源码信息；
+- 整合测试通过 monkeypatch 隔离 LLM 和文件读取依赖，
+  保持离线、可重复执行。
 
 运行全部测试：
 
@@ -437,16 +490,16 @@ python -m pytest tests/test_target_tool_calling.py -v
 
 ## 后续计划
 
-项目将按照以下顺序逐步开发：
+项目将在已完成的输入澄清和有限证据循环上，
+按照以下顺序继续开发：
 
-1. 调用大模型生成学习路线；
-2. 使用 Pydantic生成结构化结果；
-3. 自动读取本地代码仓库；
-4. 增加仓库读取工具；
-5. 使用 LangGraph管理工作流；
-6. 增加代码库问答；
-7. 增加测验和学习反馈；
-8. 保存用户学习进度。
+1. 增加人工确认与中断后恢复；
+2. 根据真实源码生成测验和实践任务；
+3. 记录学习结果并评估掌握度；
+4. 根据薄弱点重新规划后续任务；
+5. 增加开源贡献准备度评估；
+6. 增加代码库 RAG 问答；
+7. 保存用户学习进度并提供可交互界面。
 
 ## 当前暂不实现
 

@@ -1,5 +1,4 @@
 """AgentState 的单元测试：默认值、reducer 语义与安全边界。"""
-from tkinter.constants import CURRENT
 
 from repo_mentor.models import LearnerProfile, TargetTask
 from repo_mentor.workflow_state import (
@@ -56,3 +55,58 @@ def test_validate_state_no_secrets_accepts_normal():
     ]
 
     assert validate_state_no_secrets(state) is True
+
+def test_create_initial_state_has_bounded_evidence_defaults():
+    """初始状态应限制最多补读两个文件。"""
+    state = create_initial_state(
+        make_learner(),
+        make_target(),
+    )
+    budget = state["evidence_budget"]
+
+    assert state["step_count"] == 0
+    assert state["max_steps"] == 2
+    assert state["evidence_candidates"] == []
+    assert state["read_evidence_files"] == []
+    assert state["evidence_stop_reason"] is None
+
+    assert budget.max_files == 2
+    assert budget.used_files == 0
+    assert budget.used_chars == 0
+    assert budget.stopped is False
+    assert budget.stop_reason is None
+
+def test_initial_states_do_not_share_mutable_budget():
+    """两个工作流不能共享预算用量。"""
+    first = create_initial_state(
+        make_learner(),
+        make_target(),
+    )
+    second = create_initial_state(
+        make_learner(),
+        make_target(),
+    )
+
+    first_budget = first["evidence_budget"]
+    second_budget = second["evidence_budget"]
+
+    assert first_budget is not second_budget
+    assert (
+        first["evidence_candidates"]
+        is not second["evidence_candidates"]
+    )
+    assert (
+        first["read_evidence_files"]
+        is not second["read_evidence_files"]
+    )
+
+    first_budget.consume(
+        file_count=1,
+        char_count=100,
+    )
+
+    assert first_budget.used_files == 1
+    assert first_budget.used_chars == 100
+
+    assert second_budget.used_files == 0
+    assert second_budget.used_chars == 0
