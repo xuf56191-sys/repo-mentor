@@ -147,8 +147,14 @@ RepoMentor 当前已经完成 V0.2 个性化路线原型和 V0.4 真实仓库证
 - 增加 `conservative_evidence_stop` 节点，达到次数上限、
   证据预算耗尽或候选文件用尽时，明确说明停止原因和缺失信息；
 - 为生产工作流设置 LangGraph `recursion_limit=20` 作为运行时熔断保险；
-- 自适应节点、路由、成功分支、保守停止分支和有限循环均有自动化测试，
-  当前完整测试集为 **52 passed**。
+- 使用 `InMemorySaver` 为工作流增加短期 checkpoint；
+- 使用外部 `thread_id` 定位会话，使同一会话可以从 `interrupt()` 恢复，
+  不同会话的状态互相隔离；
+- 增加 `confirm_roadmap` 人工确认节点，支持批准路线或提交目标/难度修改；
+- 增加 `apply_human_revision` 节点，修改后重建严格领域模型、
+  清理失效的分析/证据/路线并重新生成；
+- 自适应节点、路由、有限循环、人工确认和恢复流程均有自动化测试，
+  当前完整测试集为 **66 passed**。
 
 
 
@@ -352,12 +358,14 @@ RepoMentor 会将其标记为：
 - 运行时：`messages`（`add_messages` 去重合并）、`errors`（累积）、
   `missing_fields`、`clarification_questions`、`step_count`、`max_steps`、
   `evidence_budget`、`evidence_candidates`、`read_evidence_files` 和
-  `evidence_stop_reason`。
+  `evidence_stop_reason`；
+- 人工确认：`confirmation_status`、`human_confirmation` 和
+  `revision_count`。
 
 State 不保存 API Key 等敏感信息，
 `validate_state_no_secrets` 只检查键名，避免把普通单词误判为密钥。
 
-### 八个工作流节点
+### 十个工作流节点
 
 ```text
 START
@@ -366,7 +374,12 @@ START
   └─ 输入完整 → analyze_learner
                  → analyze_target
                  → collect_evidence
-                    ├─ 内容证据充分 → generate_roadmap → END
+                    ├─ 内容证据充分 → generate_roadmap
+                    │                    → confirm_roadmap
+                    │                       ├─ approve → END
+                    │                       └─ revise
+                    │                           → apply_human_revision
+                    │                           → analyze_learner（重新生成）
                     ├─ 仍可补读 → read_more_evidence ─┐
                     │                                └→ 再次证据路由
                     └─ 达到上限 → conservative_evidence_stop → END
@@ -381,6 +394,8 @@ START
   `ready` 或 `needs_clarification`；
 - `route_after_evidence` 根据内容证据、补读次数、证据预算和未读候选文件，
   返回 `enough_evidence`、`read_more` 或 `stop`；
+- `route_after_confirmation` 根据经过严格校验的人工决定，
+  返回 `approved` 或 `revision_requested`；
 - 成功条件优先于停止条件，
   因此第二次补读获得有效证据时仍会正常生成路线；
 - `max_steps=2` 是可解释、可测试的业务停止条件；
@@ -391,9 +406,18 @@ START
 
 `adaptive_workflow.py` 提供：
 
-- `build_adaptive_graph()`：组装并编译基础图；
+- `build_adaptive_graph()`：使用 `InMemorySaver` 组装并编译工作流；
+- `make_thread_config(thread_id)`：生成 checkpoint 调用配置，
+  `thread_id` 属于运行时配置而不是业务 State；
+- `start_adaptive_workflow(...)`：启动会话并在路线确认处中断；
+- `resume_adaptive_workflow(...)`：使用相同 `app` 和 `thread_id`
+  提交 `approve` / `revise` 决定并恢复；
 - `run_adaptive_workflow(repository_path, learner_profile, target_task)`
-  → 一次 invoke 返回结构化 `LearningRoadmap`。
+  → 兼容旧的一次性入口，自动批准结构化 `LearningRoadmap`。
+
+当前 `InMemorySaver` 只适用于本地开发与测试。
+关闭 Python 进程后 checkpoint 会丢失；生产环境需要换成
+SQLite、PostgreSQL 等持久化 Checkpointer。
 
 节点与图均有单元测试；LLM 依赖通过 monkeypatch 打桩，
 测试不花钱、不联网、可重复。
@@ -415,6 +439,8 @@ START
 - 当前不进行全仓库源码批量读取；
 - 当路径证据不足时，工作流最多补读两个目标相关候选文件，
   不会扫描或批量读取整个仓库；
+- 当前 checkpoint 使用进程内存保存，服务重启后不能恢复旧会话；
+- 当前尚未提供交互式 UI，人工确认通过工作流入口提交；
 - 当前不自动修改代码、不自动创建 PR。
 
 ## 当前演示效果
@@ -464,13 +490,17 @@ AI Agent 是一种能够感知环境、自主决策并采取行动以完成特�
 测试还覆盖了 V0.6 自适应工作流：
 
 - AgentState 默认值与 reducer 语义（累积/覆盖）与密钥边界；
-- 八个工作流节点的独立行为；
+- 十个工作流节点的独立行为；
 - 原始输入完整与缺失字段时的两条路由；
 - 内容证据充分、继续补读、步数达上限、预算停止和候选耗尽路由；
 - 候选文件不重复读取，且旧的 `EvidenceBudget` 对象不被原地修改；
 - 连续读取失败时最多尝试两个文件，第三个候选文件不会被读取；
 - 第二次读取成功时能退出循环并产出结构化路线；
 - 保守停止时会返回停止原因和仍然缺失的源码信息；
+- 人工确认输入的严格模型校验以及批准/修改路由；
+- 相同 `thread_id` 能从 checkpoint 恢复并到达 `END`；
+- 不同 `thread_id` 的目标、状态和中断点互不干扰；
+- 修改目标后会重新生成路线、再次进入确认，并保留修订次数；
 - 整合测试通过 monkeypatch 隔离 LLM 和文件读取依赖，
   保持离线、可重复执行。
 
@@ -490,15 +520,15 @@ python -m pytest tests/test_target_tool_calling.py -v
 
 ## 后续计划
 
-项目将在已完成的输入澄清和有限证据循环上，
+项目将在已完成的输入澄清、有限证据循环和人工确认恢复上，
 按照以下顺序继续开发：
 
-1. 增加人工确认与中断后恢复；
-2. 根据真实源码生成测验和实践任务；
-3. 记录学习结果并评估掌握度；
-4. 根据薄弱点重新规划后续任务；
-5. 增加开源贡献准备度评估；
-6. 增加代码库 RAG 问答；
+1. 根据真实源码生成测验和实践任务；
+2. 记录学习结果并评估掌握度；
+3. 根据薄弱点重新规划后续任务；
+4. 增加开源贡献准备度评估；
+5. 增加代码库 RAG 问答；
+6. 将内存 checkpoint 升级为持久化存储；
 7. 保存用户学习进度并提供可交互界面。
 
 ## 当前暂不实现
@@ -548,6 +578,7 @@ repo-mentor/
 │       ├── workflow_state.py
 │       ├── adaptive_nodes.py
 │       ├── adaptive_workflow.py
+│       ├── checkpoint_interrupt_demo.py
 │       └── demo_adaptive_flow.py
 ├── tests/
 │   ├── test_repository_ranker.py
@@ -556,6 +587,7 @@ repo-mentor/
 │   ├── test_target_tool_calling.py
 │   ├── test_workflow_state.py
 │   ├── test_adaptive_nodes.py
+│   ├── test_roadmap_confirmation.py
 │   └── test_adaptive_workflow.py
 ├── pytest.ini
 ├── .env.example

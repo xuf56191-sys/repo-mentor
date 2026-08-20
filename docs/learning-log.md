@@ -2222,3 +2222,199 @@ collect_evidence
 * 在当前有限循环上学习 LangGraph 人工确认与中断恢复；
 * 设计用户补充文件或模块信息后如何继续原工作流；
 * 将路线生成结果进一步连接到测验、掌握度评估和重新规划闭环。
+
+---
+
+## 2026-08-19：人工确认与短期记忆
+
+### 今天的目标
+
+学习 LangGraph Checkpointer、`thread_id`、`interrupt()` 和
+`Command(resume=...)`，让 RepoMentor 在生成学习路线后暂停，
+等待用户批准路线或修改目标/学习难度，再从同一会话继续执行。
+
+今天的验收标准是：
+
+* 相同 `thread_id` 可以从中断点恢复；
+* 不同 `thread_id` 的会话互相隔离；
+* 用户修改目标后，旧的派生状态失效，路线会根据新目标重新生成。
+
+### 今天完成
+
+* 编写并运行最小 `checkpoint_interrupt_demo.py`，验证暂停、恢复和会话隔离；
+* 使用 `InMemorySaver` 编译 RepoMentor 自适应工作流；
+* 新增 `RoadmapConfirmation` 严格模型，校验 `approve` 与 `revise` 输入；
+* 为 `AgentState` 增加 `confirmation_status`、`human_confirmation`
+  和 `revision_count`；
+* 新增 `confirm_roadmap` 节点，在生成路线后调用 `interrupt()`；
+* 新增 `apply_human_revision` 节点，合并修改、重建领域模型并清理失效状态；
+* 新增 `route_after_confirmation`，在批准结束和修改重生成之间路由；
+* 将工作流扩展为 10 个节点，并形成“生成—确认—修改—重生成”闭环；
+* 新增 `make_thread_config()`，统一传递 `thread_id` 和递归上限；
+* 新增 `start_adaptive_workflow()` 和 `resume_adaptive_workflow()`；
+* 保留 `run_adaptive_workflow()` 作为自动批准路线的旧接口兼容入口；
+* 完成同会话恢复、不同会话隔离和目标修改后重新生成三项整合测试；
+* 完整测试集共 66 个测试，全部通过。
+
+### 1. Checkpoint 保存的是什么
+
+Checkpoint 不是只保存业务字段的普通字典，
+而是保存工作流在某一时刻继续执行所需的运行上下文，包括：
+
+* 当前 `AgentState`；
+* 已经执行到哪个节点；
+* 下一步待执行节点；
+* 中断任务及其恢复位置；
+* 当前会话的历史 checkpoint。
+
+因此，恢复时不需要把 `topic`、`roadmap` 或暂停节点重新传给
+`Command(resume=...)`。恢复命令只携带人工回复，
+LangGraph 会使用 `thread_id` 查找之前保存的完整执行上下文。
+
+### 2. thread_id 为什么不属于 AgentState
+
+`AgentState` 保存 RepoMentor 的业务数据，
+例如学习者画像、目标任务、仓库证据和学习路线。
+`thread_id` 保存的是“这次调用属于哪个运行会话”的定位信息，
+属于 LangGraph Checkpointer 的运行时配置。
+
+本项目统一使用：
+
+```python
+{
+    "configurable": {
+        "thread_id": thread_id,
+    },
+    "recursion_limit": 20,
+}
+```
+
+把 `thread_id` 放进 State 会让业务模型与存储基础设施耦合，
+也不能替代 `configurable.thread_id` 对 Checkpointer 的定位作用。
+
+### 3. interrupt 与 resume 的执行关系
+
+当前工作流的成功路径变为：
+
+```text
+generate_roadmap
+→ confirm_roadmap
+  → interrupt(确认信息)
+  → 保存 checkpoint 并返回 __interrupt__
+
+同一个 app + 同一个 thread_id
+→ Command(resume={"action": "approve" | "revise"})
+→ confirm_roadmap 从 interrupt 位置继续
+```
+
+使用 `approve` 时，确认状态变为 `approved`，随后到达 `END`。
+使用 `revise` 时，确认状态变为 `revision_requested`，
+随后进入 `apply_human_revision` 并重新运行分析、证据收集和路线生成。
+
+恢复时必须复用同一个编译后 `app`，因为当前的
+`InMemorySaver` 绑定在该 app 使用的内存存储上。
+重新调用 `build_adaptive_graph()` 会得到新的 Saver，
+它找不到旧 app 中的中断记录。
+
+### 4. 人工输入也必须严格校验
+
+用户提交的确认决定属于外部输入，不能直接决定控制流。
+`RoadmapConfirmation` 使用以下协议：
+
+* `approve`：不能同时携带更新内容；
+* `revise`：必须至少提供 `target_updates` 或 `learner_updates`；
+* 非法 action 或额外字段由严格 Pydantic 模型拒绝。
+
+`confirm_roadmap` 先把恢复数据转换为
+`RoadmapConfirmation`，再写入 State。
+`route_after_confirmation` 只读取已经校验过的
+`confirmation_status`，因此路由函数仍然保持确定、轻量和可测试。
+
+### 5. 修改目标后的状态失效边界
+
+目标发生变化后，不能只修改 `target_input` 并保留旧路线。
+旧目标产生的下游状态已经失去语义有效性。
+
+`apply_human_revision` 会：
+
+* 合并 `target_updates` / `learner_updates`；
+* 重新构造 `TargetTask` 和 `LearnerProfile`，再次执行严格校验；
+* 清空 `target_analysis`、`learner_analysis` 和旧 `roadmap`；
+* 使用 `Overwrite([])` 真正替换带 reducer 的旧证据和错误列表；
+* 重置补读次数、证据预算、候选文件、已读文件和停止原因；
+* 清理上一轮澄清问题；
+* 增加 `revision_count`；
+* 保留仓库未变化时仍然有效的 `repository_path`、`repo_readme`
+  和 `repo_tree`。
+
+这里使用 `Overwrite([])` 很重要。
+`repo_evidence` 和 `errors` 使用累积 reducer，普通空列表更新只会被追加，
+不能清除旧值；`Overwrite` 才表示用新值替换 reducer 的历史结果。
+
+### 6. InMemorySaver 的适用边界
+
+`InMemorySaver` 适合本地开发、单元测试和概念验证：
+
+* 配置简单；
+* 同一 Python 进程内可以暂停和恢复；
+* 可以快速验证多个 `thread_id` 的隔离行为。
+
+它不是生产持久化方案。Python 进程关闭后，
+所有 checkpoint 都会丢失，也无法让多个服务实例共享会话。
+后续需要根据部署方式换成 SQLite 或 PostgreSQL Checkpointer。
+
+### 7. 测试与验收
+
+今天新增或扩展的测试覆盖：
+
+* `RoadmapConfirmation` 的批准、修改和非法组合；
+* 人工确认相关 State 默认值；
+* `confirm_roadmap` 的中断载荷和恢复结果；
+* `apply_human_revision` 对目标、学习者和失效状态的处理；
+* `route_after_confirmation` 的批准、修改和非法状态；
+* 编译后图包含 10 个节点和人工确认闭环；
+* 相同 `thread_id` 能在批准后继续到 `END`；
+* 同一个 app 中不同 `thread_id` 保留各自目标和中断点；
+* 修改目标后生成器依次收到旧标题和新标题；
+* 新路线携带修改后的 `TargetTask`，并再次进入确认中断；
+* 第二次路线最终批准后，会话正常结束。
+
+最终完整测试结果：
+
+```text
+66 passed in 3.33s
+```
+
+8 月 19 日的三项验收标准全部通过。
+
+### 今天踩的坑
+
+* 启用 Checkpointer 后，所有 `invoke()` 都必须提供
+  `configurable.thread_id`；只测试 `get_graph()` 不会暴露这个问题；
+* `13 deselected` 表示 `-k` 过滤了未选中的测试，不表示测试失败；
+* 函数 docstring 必须是函数体中的第一条语句；
+* 恢复时不能重新创建 app，否则新的 `InMemorySaver` 没有旧 checkpoint；
+* 修改目标后不能继续使用旧的严格模型、分析结果、证据和路线；
+* 带累积 reducer 的字段不能用普通空列表清空；
+* `interrupt()` 所携带的数据应该能够 JSON 序列化；
+* 测试文件中不能保留同名未完成测试，后定义的函数会覆盖前一个定义。
+
+### 核心认识
+
+HITL 不是在普通函数中临时调用一次 `input()`，
+而是把“等待人类决定”建模为工作流中的可恢复状态：
+
+* Checkpointer 保存执行上下文；
+* `thread_id` 定位具体会话；
+* `interrupt()` 暂停并向调用方暴露问题；
+* `Command(resume=...)` 把人工决定送回原中断点；
+* 严格模型保护人工输入边界；
+* 状态失效规则保证修改后不会混用旧目标产生的结果；
+* 自动化测试证明恢复、隔离和重新生成都符合预期。
+
+### 下一步
+
+* 基于确认后的路线生成测验题和源码实践任务；
+* 设计回答记录与掌握度评估 State；
+* 将掌握度变化连接到后续路线重规划；
+* 在需要跨进程恢复时，将 `InMemorySaver` 替换为持久化 Checkpointer。

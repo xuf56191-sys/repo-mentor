@@ -1,6 +1,8 @@
 from pathlib import Path
+import pytest
 from repo_mentor.workflow_state import create_initial_state
 from repo_mentor import adaptive_nodes
+
 from repo_mentor.models import (
     DailyPlan,
     EvidenceSource,
@@ -14,9 +16,15 @@ from repo_mentor.repository_safeguards import EvidenceBudget
 from repo_mentor.adaptive_workflow import (
     GRAPH_RECURSION_LIMIT,
     build_adaptive_graph,
+    make_thread_config,
+    resume_adaptive_workflow,
     run_adaptive_workflow,
+    start_adaptive_workflow,
     route_after_request,
     route_after_evidence,
+    route_after_confirmation,
+    start_adaptive_workflow,
+    resume_adaptive_workflow,
 )
 
 
@@ -96,7 +104,7 @@ def fake_generator(
     )
 
 def test_graph_has_expected_nodes():
-    """图结构测试：8 个业务节点和有限循环均已注册。"""
+    """图结构测试：10 个业务节点、有限证据循环和人工确认闭环均已注册。"""
     graph = build_adaptive_graph().get_graph()
     # graph.nodes 是 dict，迭代得到节点 id（含虚拟 __start__/__end__）
     node_ids = set(graph.nodes)
@@ -109,6 +117,8 @@ def test_graph_has_expected_nodes():
         "generate_roadmap",
         "read_more_evidence",
         "conservative_evidence_stop",
+        "confirm_roadmap",
+        "apply_human_revision",
     } <= node_ids
 
     # 边必须按流程图顺序连接
@@ -135,6 +145,20 @@ def test_graph_has_expected_nodes():
     assert (
                "read_more_evidence",
                "conservative_evidence_stop",
+           ) in edges
+    assert (
+               "generate_roadmap",
+               "confirm_roadmap",
+           ) in edges
+
+    assert (
+               "confirm_roadmap",
+               "apply_human_revision",
+           ) in edges
+
+    assert (
+               "apply_human_revision",
+               "analyze_learner",
            ) in edges
 
 def test_run_adaptive_workflow_returns_roadmap(
@@ -283,15 +307,18 @@ def test_graph_routes_missing_time_to_clarification():
     learner_input = make_learner().model_dump(mode="json")
     learner_input.pop("daily_hours")
 
-    result = build_adaptive_graph().invoke({
-        "learner_input": learner_input,
-        "target_input": make_target().model_dump(mode="json"),
-        "repository_path": "not-used",
-        "repo_evidence": [],
-        "messages": [],
-        "errors": [],
-        "step_count": 0,
-    })
+    result = build_adaptive_graph().invoke(
+        {
+            "learner_input": learner_input,
+            "target_input": make_target().model_dump(mode="json"),
+            "repository_path": "not-used",
+            "repo_evidence": [],
+            "messages": [],
+            "errors": [],
+            "step_count": 0,
+        },
+        config=make_thread_config("missing-time"),
+    )
 
     assert result["missing_fields"] == [
         "learner_input.daily_hours"
@@ -318,15 +345,18 @@ def test_graph_routes_empty_evidence_to_conservative_stop(
         fake_empty_evidence,
     )
 
-    result = build_adaptive_graph().invoke({
-        "learner_input": make_learner().model_dump(mode="json"),
-        "target_input": make_target().model_dump(mode="json"),
-        "repository_path": "not-used",
-        "repo_evidence": [],
-        "messages": [],
-        "errors": [],
-        "step_count": 0,
-    })
+    result = build_adaptive_graph().invoke(
+        {
+            "learner_input": make_learner().model_dump(mode="json"),
+            "target_input": make_target().model_dump(mode="json"),
+            "repository_path": "not-used",
+            "repo_evidence": [],
+            "messages": [],
+            "errors": [],
+            "step_count": 0,
+        },
+        config=make_thread_config("empty-evidence"),
+    )
 
     assert result["missing_fields"] == ["repo_evidence"]
     assert result["evidence_stop_reason"] == (
@@ -405,7 +435,10 @@ def test_bounded_evidence_loop_stops_after_two_failed_reads(
         "repository_path": str(tmp_path),
     })
 
-    result = build_adaptive_graph().invoke(initial)
+    result = build_adaptive_graph().invoke(
+        initial,
+        config=make_thread_config("bounded-loop"),
+    )
 
     # 最核心的有限循环断言：
     # 即使有三个候选文件，也只能读取前两个。
@@ -514,7 +547,10 @@ def test_evidence_loop_finishes_when_second_read_succeeds(
         "repository_path": str(tmp_path),
     })
 
-    result = build_adaptive_graph().invoke(initial)
+    result = build_adaptive_graph().invoke(
+        initial,
+        config=make_thread_config("second-read-succeeds"),
+    )
 
     assert read_calls == [
         "src/a.py",
@@ -541,3 +577,270 @@ def test_evidence_loop_finishes_when_second_read_succeeds(
     assert len(result["errors"]) == 1
     assert isinstance(result["roadmap"], LearningRoadmap)
     assert result["missing_fields"] == []
+
+
+def test_route_after_confirmation_chooses_correct_branch():
+    assert route_after_confirmation({
+        "confirmation_status": "approved",
+    }) == "approved"
+
+    assert route_after_confirmation({
+        "confirmation_status": "revision_requested",
+    }) == "revision_requested"
+
+
+def test_route_after_confirmation_rejects_invalid_status():
+    with pytest.raises(
+        ValueError,
+        match="人工确认路由收到非法状态",
+    ):
+        route_after_confirmation({
+            "confirmation_status": "not_requested",
+        })
+
+
+def test_same_thread_can_resume_after_confirmation(
+    monkeypatch,
+    tmp_path: Path,
+):
+    """相同 thread_id 可以从路线确认中断点继续。"""
+    repo = make_mini_repo(tmp_path)
+
+    # 用确定性的假生成器替代真实 LLM，避免网络和费用。
+    monkeypatch.setattr(
+        adaptive_nodes,
+        "generate_structured_roadmap",
+        fake_generator,
+    )
+
+    # InMemorySaver 绑定在编译后的 app 上，恢复时必须复用它。
+    app = build_adaptive_graph()
+    thread_id = "confirmation-session-a"
+
+    # 第一次调用会执行到 confirm_roadmap，并在 interrupt() 暂停。
+    paused = start_adaptive_workflow(
+        app,
+        thread_id=thread_id,
+        repository_path=str(repo),
+        learner_profile=make_learner(),
+        target_task=make_target(),
+    )
+
+    assert "__interrupt__" in paused
+
+    interrupt_value = paused["__interrupt__"][0].value
+    assert interrupt_value["kind"] == "roadmap_confirmation"
+    assert interrupt_value["allowed_actions"] == [
+        "approve",
+        "revise",
+    ]
+
+    # Command(resume=...) 不携带旧状态；相同 thread_id 负责定位它。
+    resumed = resume_adaptive_workflow(
+        app,
+        thread_id=thread_id,
+        confirmation={"action": "approve"},
+    )
+
+    assert resumed["confirmation_status"] == "approved"
+    assert resumed["human_confirmation"].action == "approve"
+    assert isinstance(resumed["roadmap"], LearningRoadmap)
+    assert "__interrupt__" not in resumed
+
+    # next 为空元组表示工作流已经执行到 END，没有待运行节点。
+    snapshot = app.get_state(
+        make_thread_config(thread_id)
+    )
+    assert snapshot.next == ()
+
+
+def test_different_threads_are_isolated(
+    monkeypatch,
+    tmp_path: Path,
+):
+    """不同 thread_id 的 checkpoint 状态必须互不干扰。"""
+    repo = make_mini_repo(tmp_path)
+
+    # 使用同一个确定性假生成器，使测试只关注会话隔离，
+    # 不受 LLM 网络请求和随机输出影响。
+    monkeypatch.setattr(
+        adaptive_nodes,
+        "generate_structured_roadmap",
+        fake_generator,
+    )
+
+    # 两个会话必须共用同一个 app：
+    # 这样才能证明隔离来自 thread_id，而不是来自两个独立 Saver。
+    app = build_adaptive_graph()
+
+    target_a = make_target().model_copy(
+        update={
+            "title": "理解目录树扫描",
+        }
+    )
+    target_b = make_target().model_copy(
+        update={
+            "title": "学习人工确认节点",
+            "description": "理解人工确认节点的中断与恢复流程",
+            "expected_outcome": "能够解释人工确认节点如何恢复执行",
+        }
+    )
+
+    # 会话 A、B 分别使用不同的 thread_id 启动，
+    # 两者都会停在各自的 confirm_roadmap interrupt 上。
+    paused_a = start_adaptive_workflow(
+        app,
+        thread_id="session-a",
+        repository_path=str(repo),
+        learner_profile=make_learner(),
+        target_task=target_a,
+    )
+    paused_b = start_adaptive_workflow(
+        app,
+        thread_id="session-b",
+        repository_path=str(repo),
+        learner_profile=make_learner(),
+        target_task=target_b,
+    )
+
+    assert "__interrupt__" in paused_a
+    assert "__interrupt__" in paused_b
+
+    # 每个 interrupt payload 都应携带自己会话中的目标，
+    # 不能因为共用 app 而相互覆盖。
+    payload_a = paused_a["__interrupt__"][0].value
+    payload_b = paused_b["__interrupt__"][0].value
+    assert payload_a["target"]["title"] == target_a.title
+    assert payload_b["target"]["title"] == target_b.title
+
+    # 只批准会话 A。Checkpointer 会通过 session-a 找到 A 的暂停点。
+    resumed_a = resume_adaptive_workflow(
+        app,
+        thread_id="session-a",
+        confirmation={"action": "approve"},
+    )
+    assert resumed_a["confirmation_status"] == "approved"
+    assert resumed_a["target_task"].title == target_a.title
+
+    # A 已到达 END，所以没有待执行节点。
+    snapshot_a = app.get_state(
+        make_thread_config("session-a")
+    )
+    assert snapshot_a.next == ()
+
+    # B 没有收到 resume，仍应停在自己的确认节点，
+    # 并继续保存 B 的目标和未确认状态。
+    snapshot_b = app.get_state(
+        make_thread_config("session-b")
+    )
+    assert snapshot_b.next == ("confirm_roadmap",)
+    assert snapshot_b.values["target_task"].title == target_b.title
+    assert snapshot_b.values["confirmation_status"] == "not_requested"
+
+
+def test_revising_target_regenerates_roadmap(
+    monkeypatch,
+    tmp_path: Path,
+):
+    """修改目标后清理旧派生状态，并用新目标重新生成路线。"""
+    repo = make_mini_repo(tmp_path)
+    generated_target_titles: list[str] = []
+
+    def tracking_generator(
+        user_profile,
+        target_task,
+        repository_readme,
+        repository_tree,
+    ) -> LearningRoadmap:
+        """记录每次生成路线时真正收到的目标标题。"""
+        generated_target_titles.append(target_task["title"])
+        return fake_generator(
+            user_profile=user_profile,
+            target_task=target_task,
+            repository_readme=repository_readme,
+            repository_tree=repository_tree,
+        )
+
+    monkeypatch.setattr(
+        adaptive_nodes,
+        "generate_structured_roadmap",
+        tracking_generator,
+    )
+
+    app = build_adaptive_graph()
+    thread_id = "revision-session"
+    original_target = make_target()
+
+    # 第一轮先按原目标生成路线，并停在人工确认节点。
+    first_pause = start_adaptive_workflow(
+        app,
+        thread_id=thread_id,
+        repository_path=str(repo),
+        learner_profile=make_learner(),
+        target_task=original_target,
+    )
+    assert "__interrupt__" in first_pause
+    first_payload = first_pause["__interrupt__"][0].value
+    assert first_payload["target"]["title"] == original_target.title
+    assert first_payload["revision_count"] == 0
+
+    revised_title = "掌握 LangGraph checkpoint 恢复"
+    revised_description = "理解 checkpoint、thread_id 与中断恢复的协作流程"
+    revised_outcome = "能够实现可暂停、可修改并可恢复的工作流"
+
+    # revise 会先恢复 confirm_roadmap，再进入 apply_human_revision。
+    # 修订节点重建严格模型、清理旧派生状态，然后重新执行分析和生成。
+    second_pause = resume_adaptive_workflow(
+        app,
+        thread_id=thread_id,
+        confirmation={
+            "action": "revise",
+            "target_updates": {
+                "title": revised_title,
+                "description": revised_description,
+                "expected_outcome": revised_outcome,
+            },
+        },
+    )
+
+    # 新路线生成后会再次进入 confirm_roadmap，因此第二次仍应中断。
+    assert "__interrupt__" in second_pause
+    second_payload = second_pause["__interrupt__"][0].value
+    assert second_payload["target"]["title"] == revised_title
+    assert second_payload["roadmap"]["target_task"]["title"] == (
+        revised_title
+    )
+    assert second_payload["revision_count"] == 1
+
+    # 生成器被调用两次，且第二次收到的已经是修改后的目标。
+    assert generated_target_titles == [
+        original_target.title,
+        revised_title,
+    ]
+
+    # 第二次中断时，checkpoint 中保存的是新领域模型和新路线。
+    revised_snapshot = app.get_state(
+        make_thread_config(thread_id)
+    )
+    assert revised_snapshot.next == ("confirm_roadmap",)
+    assert revised_snapshot.values["target_task"].title == revised_title
+    assert revised_snapshot.values["roadmap"].target_task.title == (
+        revised_title
+    )
+    assert revised_snapshot.values["revision_count"] == 1
+
+    # 用户最终批准第二版路线，同一会话才真正到达 END。
+    final_result = resume_adaptive_workflow(
+        app,
+        thread_id=thread_id,
+        confirmation={"action": "approve"},
+    )
+    assert final_result["confirmation_status"] == "approved"
+    assert final_result["human_confirmation"].action == "approve"
+    assert final_result["target_task"].title == revised_title
+    assert final_result["roadmap"].target_task.title == revised_title
+
+    final_snapshot = app.get_state(
+        make_thread_config(thread_id)
+    )
+    assert final_snapshot.next == ()

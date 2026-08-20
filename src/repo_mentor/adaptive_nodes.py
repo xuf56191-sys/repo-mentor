@@ -8,18 +8,23 @@
 - analyze_target        ：分析目标任务关键词（纯规则）
 - collect_evidence      ：收集目标相关证据（复用 V0.4 证据层）
 - generate_roadmap      ：调用 LLM 生成学习路线（唯一需要 LLM 的节点）
+- confirm_roadmap       ：暂停图并等待用户确认路线
 
-节点间接力：analyze_learner / analyze_target 的中间产物
-→ collect_evidence 收集证据 → generate_roadmap 产出路线。
+节点间接力：
+generate_roadmap 产出路线
+→ confirm_roadmap 等待人工批准或修改
 """
 
 from __future__ import annotations
+from langgraph.types import Overwrite, interrupt
+from repo_mentor.repository_safeguards import EvidenceBudget
 from dataclasses import replace
 from repo_mentor.repository_tools import read_repo_file
 from repo_mentor.models import (
     LearnerProfile,
     RepositoryEvidence,
     TargetTask,
+    RoadmapConfirmation,
 )
 from repo_mentor.repository_ranker import (
     extract_target_keywords,  # 从目标任务提取文件路径关键词
@@ -417,3 +422,171 @@ def generate_roadmap(state: AgentState) -> dict:
         repository_tree=state["repo_tree"],
     )
     return {"roadmap": roadmap}
+
+# ---------------- 节点 9：等待用户确认路线（HITL） ----------------
+
+def confirm_roadmap(
+    state: AgentState,
+) -> dict:
+    """暂停工作流，等待用户批准路线或提交修改。"""
+    roadmap = state.get("roadmap")
+
+    if roadmap is None:
+        raise ValueError(
+            "确认路线前必须先生成 roadmap"
+        )
+
+    # interrupt 的数据必须可以被 JSON 序列化。
+    payload = {
+        "kind": "roadmap_confirmation",
+        "question": "是否批准当前路线，或修改目标/难度后重新生成？",
+        "target": state["target_task"].model_dump(
+            mode="json"
+        ),
+        "learner": {
+            "current_level": (
+                state["learner_profile"].current_level
+            ),
+            "daily_hours": (
+                state["learner_profile"].daily_hours
+            ),
+            "available_days": (
+                state["learner_profile"].available_days
+            ),
+        },
+        "roadmap": roadmap.model_dump(mode="json"),
+        "allowed_actions": [
+            "approve",
+            "revise",
+        ],
+        "revision_count": state.get(
+            "revision_count",
+            0,
+        ),
+    }
+
+    # 第一次执行在这里暂停；
+    # 使用 Command(resume=...) 后，返回人工输入。
+    raw_decision = interrupt(payload)
+
+    # 人工输入也是外部输入，必须经过严格模型校验。
+    confirmation = RoadmapConfirmation.model_validate(
+        raw_decision
+    )
+
+    if confirmation.action == "approve":
+        status = "approved"
+    else:
+        status = "revision_requested"
+
+    return {
+        "human_confirmation": confirmation,
+        "confirmation_status": status,
+    }
+
+
+# ---------------- 节点 10：应用人工修改并重置派生状态 ----------------
+
+def apply_human_revision(
+    state: AgentState,
+) -> dict:
+    """合并人工修改、重建领域模型并清理旧路线状态。"""
+    raw_confirmation = state.get(
+        "human_confirmation"
+    )
+
+    if raw_confirmation is None:
+        raise ValueError(
+            "应用人工修改前必须存在 human_confirmation"
+        )
+
+    # Checkpointer 恢复后可能得到模型或可校验字典，
+    # 因此在节点边界再次进行严格校验。
+    confirmation = RoadmapConfirmation.model_validate(
+        raw_confirmation
+    )
+
+    if confirmation.action != "revise":
+        raise ValueError(
+            "只有 revise 决定可以进入人工修改节点"
+        )
+
+    # 从已校验模型构造回退输入，确保缺少原始 dict 时也能工作。
+    learner_input = dict(
+        state.get("learner_input")
+        or state["learner_profile"].model_dump(
+            mode="json"
+        )
+    )
+    target_input = dict(
+        state.get("target_input")
+        or state["target_task"].model_dump(
+            mode="json"
+        )
+    )
+
+    # 人工更新覆盖原字段，未修改字段继续保留。
+    learner_input.update(
+        confirmation.learner_updates
+    )
+    target_input.update(
+        confirmation.target_updates
+    )
+
+    # 合并后的外部输入必须重新经过完整领域模型校验。
+    learner_profile = LearnerProfile.model_validate(
+        learner_input
+    )
+    target_task = TargetTask.model_validate(
+        target_input
+    )
+
+    # 新目标获得新的读取预算，但保留原来的限制配置。
+    current_budget = state.get("evidence_budget")
+
+    if current_budget is None:
+        new_budget = EvidenceBudget(
+            max_files=2,
+        )
+    else:
+        new_budget = EvidenceBudget(
+            max_files=current_budget.max_files,
+            max_chars=current_budget.max_chars,
+        )
+
+    return {
+        # 新的输入基线
+        "learner_input": learner_input,
+        "target_input": target_input,
+        "learner_profile": learner_profile,
+        "target_task": target_task,
+
+        # 旧输入产生的分析结果失效
+        "learner_analysis": {},
+        "target_analysis": {},
+
+        # repo_evidence 有 operator.add reducer，
+        # 必须用 Overwrite 才能真正替换为空列表。
+        "repo_evidence": Overwrite([]),
+
+        # 重置证据补读循环
+        "step_count": 0,
+        "evidence_budget": new_budget,
+        "evidence_candidates": [],
+        "read_evidence_files": [],
+        "evidence_stop_reason": None,
+
+        # 旧路线和旧确认结果失效
+        "roadmap": None,
+        "confirmation_status": "not_requested",
+        "human_confirmation": None,
+        "revision_count": (
+            state.get("revision_count", 0) + 1
+        ),
+
+        # 清理旧一轮产生的问题和错误；
+        # checkpoint 历史仍然保留这些旧信息。
+        "missing_fields": [],
+        "clarification_questions": [],
+        "errors": Overwrite([]),
+    }

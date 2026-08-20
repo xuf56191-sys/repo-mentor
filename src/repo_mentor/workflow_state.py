@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import operator
-from typing import Annotated, Any, TypedDict
+from typing import Annotated, Any, Literal, TypedDict
 
 from langgraph.graph.message import add_messages
 from repo_mentor.repository_safeguards import (
@@ -20,6 +20,7 @@ from repo_mentor.models import (
     LearnerProfile,
     LearningRoadmap,
     RepositoryEvidence,
+    RoadmapConfirmation,
     TargetTask,
 )
 
@@ -41,7 +42,7 @@ class AgentState(TypedDict, total=False):
     ]
 
     # ---------- 输出 ----------
-    roadmap: LearningRoadmap                 # 产生: generate_roadmap; 消费: 最终输出
+    roadmap: LearningRoadmap | None                 # 产生: generate_roadmap; 消费: 最终输出
 
     # ---------- 掌握度（V0.7 再定义正式模型，今天用 dict 占位） ----------
     mastery: dict[str, Any]                  # 产生: evaluate_answers/update_profile; 消费: replan
@@ -50,6 +51,15 @@ class AgentState(TypedDict, total=False):
     messages: Annotated[list, add_messages]  # 产生/消费: 所有节点, LLM 对话历史
     errors: Annotated[list[str], operator.add]  # 产生: 任意节点捕获的错误
     step_count: int                          # 产生：read_more_evidence；消费：有限循环路由
+    # ---------- 人工确认 ----------
+    confirmation_status: Literal[
+        "not_requested",
+        "approved",
+        "revision_requested",
+    ]
+    human_confirmation: RoadmapConfirmation | None
+    revision_count: int
+
     # 产生：inspect_request/证据检查；消费：路由函数
     missing_fields: list[str]
     clarification_questions: list[str]  # 产生：inspect_request；消费：request_clarification
@@ -86,6 +96,9 @@ def create_initial_state(
         "evidence_candidates": [],
         "read_evidence_files": [],
         "evidence_stop_reason": None,
+        "confirmation_status": "not_requested",
+        "human_confirmation": None,
+        "revision_count": 0,
     }
 
 
@@ -108,7 +121,6 @@ def validate_state_no_secrets(state:Any)->bool:
             for item in state
         )
     return  True
-
 
 
 

@@ -1,14 +1,17 @@
 """V0.6 自适应工作流：组装核心节点和条件路由。
 
-两个公开入口：
+主要公开入口：
 - build_adaptive_graph()：组装并编译图，返回可 invoke 的 app；
-- run_adaptive_workflow(...)：一次调用完成整条工作流，
-  返回结构化 LearningRoadmap。
+- start_adaptive_workflow(...)：使用 thread_id 启动可中断会话；
+- resume_adaptive_workflow(...)：使用同一 thread_id 恢复会话；
+- run_adaptive_workflow(...)：兼容旧的一次性调用，自动批准生成的路线。
 """
 
-from typing import Literal
+from typing import Any, Literal
 
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import START, END, StateGraph
+from langgraph.types import Command
 
 from repo_mentor import adaptive_nodes
 from repo_mentor.models import LearnerProfile, LearningRoadmap, TargetTask
@@ -20,11 +23,30 @@ from repo_mentor.workflow_state import (
 # 正常业务循环由 AgentState.max_steps 控制。
 GRAPH_RECURSION_LIMIT = 20
 
-def build_adaptive_graph():
-    """组装并编译基础图，返回可 invoke 的 app。"""
+
+def make_thread_config(thread_id: str) -> dict[str, Any]:
+    """构造 checkpoint 调用配置；thread_id 不写入业务 State。"""
+    if not isinstance(thread_id, str) or not thread_id.strip():
+        raise ValueError("thread_id 必须是非空字符串。")
+
+    return {
+        "configurable": {
+            "thread_id": thread_id,
+        },
+        "recursion_limit": GRAPH_RECURSION_LIMIT,
+    }
+
+
+def build_adaptive_graph(
+    checkpointer=None,
+):
+    """组装并编译基础图，返回支持 checkpoint 的 app。"""
+    if checkpointer is None:
+        checkpointer = InMemorySaver()
+
     graph = StateGraph(AgentState)
 
-    # 注册 8 个节点；执行顺序由边和条件路由决定
+    # 注册 10 个节点；执行顺序由边和条件路由决定
     graph.add_node("analyze_learner", adaptive_nodes.analyze_learner)
     graph.add_node("analyze_target", adaptive_nodes.analyze_target)
     graph.add_node("collect_evidence", adaptive_nodes.collect_evidence)
@@ -41,6 +63,14 @@ def build_adaptive_graph():
     graph.add_node(
         "conservative_evidence_stop",
         adaptive_nodes.conservative_evidence_stop,
+    )
+    graph.add_node(
+        "confirm_roadmap",
+        adaptive_nodes.confirm_roadmap,
+    )
+    graph.add_node(
+        "apply_human_revision",
+        adaptive_nodes.apply_human_revision,
     )
 
     # 连边：定义执行顺序（与流程图一致）
@@ -75,7 +105,22 @@ def build_adaptive_graph():
             "stop": "conservative_evidence_stop",
         },
     )
-    graph.add_edge("generate_roadmap", END)
+    graph.add_edge(
+        "generate_roadmap",
+        "confirm_roadmap",
+    )
+    graph.add_conditional_edges(
+        "confirm_roadmap",
+        route_after_confirmation,
+        {
+            "approved": END,
+            "revision_requested": "apply_human_revision",
+        },
+    )
+    graph.add_edge(
+        "apply_human_revision",
+        "analyze_learner",
+    )
     graph.add_edge(
         "request_clarification",
         END,
@@ -87,30 +132,69 @@ def build_adaptive_graph():
 
 
     # 编译：校验图合法性（无孤立节点、无非法边）
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)
 
-def run_adaptive_workflow(
+
+def start_adaptive_workflow(
+    app,
+    *,
+    thread_id: str,
     repository_path: str,
     learner_profile: LearnerProfile,
     target_task: TargetTask,
-) -> LearningRoadmap:
-    """构造初始 State -> 执行整条图 -> 返回结构化路线。"""
+) -> dict[str, Any]:
+    """启动一个会话，通常在路线确认节点返回 interrupt。"""
     initial = {
         **create_initial_state(learner_profile, target_task),
         "learner_input": learner_profile.model_dump(mode="json"),
         "target_input": target_task.model_dump(mode="json"),
         "repository_path": repository_path,
     }
-    result = build_adaptive_graph().invoke(
+    return app.invoke(
         initial,
-        config={
-            "recursion_limit": GRAPH_RECURSION_LIMIT,
-        },
+        config=make_thread_config(thread_id),
     )
+
+
+def resume_adaptive_workflow(
+    app,
+    *,
+    thread_id: str,
+    confirmation: dict[str, Any],
+) -> dict[str, Any]:
+    """用人工决定恢复已中断的同一会话。"""
+    return app.invoke(
+        Command(resume=confirmation),
+        config=make_thread_config(thread_id),
+    )
+
+def run_adaptive_workflow(
+    repository_path: str,
+    learner_profile: LearnerProfile,
+    target_task: TargetTask,
+) -> LearningRoadmap:
+    """兼容旧入口：启动会话，并自动批准生成的路线。"""
+    app = build_adaptive_graph()
+    thread_id = "run-adaptive-workflow"
+    result = start_adaptive_workflow(
+        app,
+        thread_id=thread_id,
+        repository_path=repository_path,
+        learner_profile=learner_profile,
+        target_task=target_task,
+    )
+
+    if result.get("__interrupt__"):
+        result = resume_adaptive_workflow(
+            app,
+            thread_id=thread_id,
+            confirmation={"action": "approve"},
+        )
+
     roadmap = result["roadmap"]
-    if not isinstance(roadmap,LearningRoadmap):
+    if not isinstance(roadmap, LearningRoadmap):
         raise TypeError(
-            f"预期LearningRoadmap,实际为{type(roadmap).__name__}"
+            f"预期 LearningRoadmap，实际为 {type(roadmap).__name__}"
         )
     return roadmap
 
@@ -175,3 +259,22 @@ def route_after_evidence(
 
     # 以上条件都不满足时返回 read_more。
     return "read_more"
+
+# ---------------- 路由 3：根据人工确认决定结束或重生成 ----------------
+
+def route_after_confirmation(
+    state: AgentState,
+) -> Literal["approved", "revision_requested"]:
+    """根据经过校验的人工确认状态选择下一步。"""
+    status = state.get("confirmation_status")
+
+    if status == "approved":
+        return "approved"
+
+    if status == "revision_requested":
+        return "revision_requested"
+
+    raise ValueError(
+        "人工确认路由收到非法状态："
+        f"{status!r}"
+    )

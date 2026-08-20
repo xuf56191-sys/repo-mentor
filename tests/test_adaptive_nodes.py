@@ -7,8 +7,13 @@
 """
 
 from pathlib import Path
+from langgraph.types import Overwrite
 from repo_mentor.repository_safeguards import EvidenceBudget
-from repo_mentor.models import LearnerProfile, TargetTask
+from repo_mentor.models import (
+    LearnerProfile,
+    RoadmapConfirmation,
+    TargetTask,
+)
 from repo_mentor.adaptive_nodes import (
     analyze_learner,
     analyze_target,
@@ -18,6 +23,8 @@ from repo_mentor.adaptive_nodes import (
     request_clarification,
     read_more_evidence,
     conservative_evidence_stop,
+    confirm_roadmap,
+    apply_human_revision,
 )
 
 
@@ -42,6 +49,19 @@ def make_target() -> TargetTask:
         expected_outcome="能说明目录树生成流程",
     )
 
+class FakeRoadmap:
+    """只提供确认节点需要的 model_dump 接口。"""
+
+    def model_dump(
+        self,
+        mode: str,
+    ) -> dict:
+        assert mode == "json"
+
+        return {
+            "learner_summary": "离线测试路线",
+            "total_estimated_hours": 2.0,
+        }
 
 def make_mini_repo(tmp_path: Path) -> Path:
     """在 pytest 临时目录里造一个最小仓库，供 collect_evidence 测试。"""
@@ -303,3 +323,266 @@ def test_conservative_evidence_stop_preserves_specific_reason():
         "文件内容超过剩余字符预算"
         in result["clarification_questions"][0]
     )
+
+# ---------------- 节点 9：confirm_roadmap ----------------
+
+def test_confirm_roadmap_accepts_approval(
+    monkeypatch,
+):
+    """批准恢复值应转换成严格模型和 approved 状态。"""
+    from repo_mentor import adaptive_nodes
+
+    captured = {}
+
+    def fake_interrupt(payload):
+        captured["payload"] = payload
+
+        return {
+            "action": "approve",
+        }
+
+    monkeypatch.setattr(
+        adaptive_nodes,
+        "interrupt",
+        fake_interrupt,
+    )
+
+    result = confirm_roadmap({
+        "learner_profile": make_learner(),
+        "target_task": make_target(),
+        "roadmap": FakeRoadmap(),
+        "revision_count": 0,
+    })
+
+    assert result["confirmation_status"] == "approved"
+    assert isinstance(
+        result["human_confirmation"],
+        RoadmapConfirmation,
+    )
+    assert (
+        result["human_confirmation"].action
+        == "approve"
+    )
+
+    payload = captured["payload"]
+
+    assert payload["kind"] == "roadmap_confirmation"
+    assert payload["target"]["title"] == "理解目录树扫描"
+    assert payload["learner"]["current_level"] == "beginner"
+    assert payload["allowed_actions"] == [
+        "approve",
+        "revise",
+    ]
+    assert payload["revision_count"] == 0
+
+def test_confirm_roadmap_accepts_revision(
+    monkeypatch,
+):
+    """修改恢复值应保存更新并进入 revision_requested 状态。"""
+    from repo_mentor import adaptive_nodes
+
+    def fake_interrupt(payload):
+        return {
+            "action": "revise",
+            "target_updates": {
+                "title": "理解 checkpoint 持久化",
+                "description": (
+                    "理解 checkpoint 保存和恢复状态的过程"
+                ),
+                "expected_outcome": (
+                    "能够实现可暂停和恢复的工作流"
+                ),
+            },
+        }
+
+    monkeypatch.setattr(
+        adaptive_nodes,
+        "interrupt",
+        fake_interrupt,
+    )
+
+    result = confirm_roadmap({
+        "learner_profile": make_learner(),
+        "target_task": make_target(),
+        "roadmap": FakeRoadmap(),
+        "revision_count": 1,
+    })
+
+    confirmation = result["human_confirmation"]
+
+    assert (
+        result["confirmation_status"]
+        == "revision_requested"
+    )
+    assert isinstance(
+        confirmation,
+        RoadmapConfirmation,
+    )
+    assert confirmation.action == "revise"
+    assert confirmation.target_updates["title"] == (
+        "理解 checkpoint 持久化"
+    )
+
+# ---------------- 节点 10：apply_human_revision ----------------
+
+    def test_apply_human_revision_rebuilds_target_and_resets_state():
+        """目标修改后应重建模型并使旧派生状态失效。"""
+        learner = make_learner()
+        target = make_target()
+
+        old_budget = EvidenceBudget(
+            max_files=3,
+            max_chars=12_000,
+            used_files=1,
+            used_chars=500,
+        )
+
+        confirmation = RoadmapConfirmation(
+            action="revise",
+            target_updates={
+                "title": "理解 checkpoint 持久化",
+                "description": (
+                    "理解 checkpoint 保存和恢复工作流状态的过程"
+                ),
+                "expected_outcome": (
+                    "能够实现可暂停和恢复的 LangGraph 工作流"
+                ),
+            },
+        )
+
+        update = apply_human_revision({
+            "learner_profile": learner,
+            "target_task": target,
+            "learner_input": learner.model_dump(mode="json"),
+            "target_input": target.model_dump(mode="json"),
+            "human_confirmation": confirmation,
+            "confirmation_status": "revision_requested",
+            "revision_count": 1,
+            "evidence_budget": old_budget,
+            "step_count": 2,
+            "evidence_candidates": ["src/old.py"],
+            "read_evidence_files": ["src/old.py"],
+            "evidence_stop_reason": "旧目标证据不足。",
+            "roadmap": FakeRoadmap(),
+            "errors": ["旧读取错误"],
+            "repo_readme": "需要保留的 README",
+            "repo_tree": "需要保留的目录树",
+        })
+
+        # 修改字段已经更新。
+        assert update["target_task"].title == (
+            "理解 checkpoint 持久化"
+        )
+        assert update["target_input"]["title"] == (
+            "理解 checkpoint 持久化"
+        )
+
+        # 未修改字段继续保留。
+        assert (
+                update["target_task"].task_type
+                == target.task_type
+        )
+        assert (
+                update["target_task"].reference
+                == target.reference
+        )
+
+        # 学习者没有修改，应保持原值。
+        assert (
+                update["learner_profile"].current_level
+                == learner.current_level
+        )
+        assert (
+                update["learner_profile"].daily_hours
+                == learner.daily_hours
+        )
+
+        # reducer 字段必须使用 Overwrite 真正清空。
+        assert isinstance(
+            update["repo_evidence"],
+            Overwrite,
+        )
+        assert update["repo_evidence"].value == []
+
+        assert isinstance(
+            update["errors"],
+            Overwrite,
+        )
+        assert update["errors"].value == []
+
+        # 新目标获得全新的读取预算。
+        new_budget = update["evidence_budget"]
+
+        assert new_budget is not old_budget
+        assert new_budget.max_files == 3
+        assert new_budget.max_chars == 12_000
+        assert new_budget.used_files == 0
+        assert new_budget.used_chars == 0
+        assert new_budget.stopped is False
+
+        assert update["step_count"] == 0
+        assert update["evidence_candidates"] == []
+        assert update["read_evidence_files"] == []
+        assert update["evidence_stop_reason"] is None
+
+        assert update["roadmap"] is None
+        assert (
+                update["confirmation_status"]
+                == "not_requested"
+        )
+        assert update["human_confirmation"] is None
+        assert update["revision_count"] == 2
+
+        # 节点不返回这些仓库级字段，
+        # LangGraph 合并局部更新时会保留原值。
+        assert "repo_readme" not in update
+        assert "repo_tree" not in update
+
+
+def test_apply_human_revision_rebuilds_learner_profile():
+    """学习者修改应重新建立 LearnerProfile。"""
+    learner = make_learner()
+    target = make_target()
+
+    confirmation = RoadmapConfirmation(
+        action="revise",
+        learner_updates={
+            "current_level": "intermediate",
+            "daily_hours": 3.0,
+        },
+    )
+
+    update = apply_human_revision({
+        "learner_profile": learner,
+        "target_task": target,
+        "learner_input": learner.model_dump(mode="json"),
+        "target_input": target.model_dump(mode="json"),
+        "human_confirmation": confirmation,
+        "revision_count": 0,
+        "evidence_budget": EvidenceBudget(
+            max_files=2,
+        ),
+    })
+
+    assert (
+        update["learner_profile"].current_level
+        == "intermediate"
+    )
+    assert (
+        update["learner_profile"].daily_hours
+        == 3.0
+    )
+
+    # 未修改的学习者字段保留。
+    assert (
+        update["learner_profile"].available_days
+        == learner.available_days
+    )
+    assert (
+        update["learner_profile"].learning_goal
+        == learner.learning_goal
+    )
+
+    # 目标没有修改。
+    assert update["target_task"] == target
+    assert update["revision_count"] == 1

@@ -110,3 +110,20 @@ def test_initial_states_do_not_share_mutable_budget():
 
     assert second_budget.used_files == 0
     assert second_budget.used_chars == 0
+
+def test_initial_state_has_confirmation_defaults():
+    """人工确认状态应从尚未请求确认开始。"""
+    state = create_initial_state(
+        make_learner(),
+        make_target(),
+    )
+
+    assert (
+        state["confirmation_status"]
+        == "not_requested"
+    )
+    assert state["human_confirmation"] is None
+    assert state["revision_count"] == 0
+
+    # thread_id 属于调用配置，不属于业务 State。
+    assert "thread_id" not in state

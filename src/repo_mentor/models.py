@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 #限制变量只能填写指定的几个固定字符串 / 数值，不能随便乱写。
-from typing import Literal
+from typing import Any, Literal
 
 
 #Pydantic 是 Python 最常用数据校验、结构化数据工具（LLM 项目标配，用来规范大模型输出 JSON）
 #BaseModel基础模型类。新建类继承它，就能实现：自动类型校验字典 ↔ 对象互相转换自动解析 JSON 字符串
 #Field给字段附加规则、默认值、注释、描述。
 #ConfigDict：给整个模型设置全局配置。
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    model_validator,
+)
 
 
 TaskType = Literal[
@@ -143,6 +148,50 @@ class TargetTask(StrictModel):
         default=None,
         description="可选的Issue、文档或其他参考信息",
     )
+
+
+ConfirmationAction = Literal[
+    "approve",
+    "revise",
+]
+
+
+class RoadmapConfirmation(StrictModel):
+    """用户对生成路线作出的确认或修改决定。"""
+
+    action: ConfirmationAction = Field(
+        description="批准当前路线，或请求修改后重新生成",
+    )
+    target_updates: dict[str, Any] = Field(
+        default_factory=dict,
+        description="需要合并进 target_input 的目标修改",
+    )
+    learner_updates: dict[str, Any] = Field(
+        default_factory=dict,
+        description="需要合并进 learner_input 的学习者修改",
+    )
+
+    @model_validator(mode="after")
+    def validate_action_payload(
+        self,
+    ) -> "RoadmapConfirmation":
+        """确保 action 与修改内容保持一致。"""
+        has_updates = bool(
+            self.target_updates
+            or self.learner_updates
+        )
+
+        if self.action == "approve" and has_updates:
+            raise ValueError(
+                "批准路线时不能同时提交修改内容"
+            )
+
+        if self.action == "revise" and not has_updates:
+            raise ValueError(
+                "请求修改时必须提供目标或学习者更新"
+            )
+
+        return self
 
 
 class EvidenceSource(StrictModel):
