@@ -127,3 +127,12 @@ def test_initial_state_has_confirmation_defaults():
 
     # thread_id 属于调用配置，不属于业务 State。
     assert "thread_id" not in state
+
+def test_initial_state_has_no_mastery_profile():
+    """尚未完成测验时，不应该伪造掌握度画像。"""
+    state = create_initial_state(
+        make_learner(),
+        make_target(),
+    )
+
+    assert state["mastery"] is None

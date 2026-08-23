@@ -82,12 +82,12 @@ RepoMentor 后续将结合 openEuler 开源实习进行真实场景验证。
 
 ## 当前版本
 
-当前版本为 **V0.6 开发阶段**
+当前版本为 **V0.6 已完成 / V0.7 模型阶段**
 
 ## 当前已实现
 
-RepoMentor 当前已经完成 V0.2 个性化路线原型和 V0.4 真实仓库证据层，
-正在实现 V0.6 自适应工作流（基于 LangGraph）。
+RepoMentor 当前已经完成 V0.2 个性化路线原型、V0.4 真实仓库证据层
+和 V0.6 LangGraph 自适应工作流，正在进入 V0.7 掌握度闭环。
 
 目前支持：
 
@@ -153,8 +153,14 @@ RepoMentor 当前已经完成 V0.2 个性化路线原型和 V0.4 真实仓库证
 - 增加 `confirm_roadmap` 人工确认节点，支持批准路线或提交目标/难度修改；
 - 增加 `apply_human_revision` 节点，修改后重建严格领域模型、
   清理失效的分析/证据/路线并重新生成；
-- 自适应节点、路由、有限循环、人工确认和恢复流程均有自动化测试，
-  当前完整测试集为 **66 passed**。
+- 使用 Mermaid 图同步展示 10 节点工作流、有限证据循环和人工修订循环；
+- 提供可离线运行的 V0.6 演示，支持 `approve` 和
+  `revise → 重新生成 → approve`；
+- 为 Checkpoint 的自定义模型反序列化配置精确 Msgpack 类型白名单；
+- 定义 `QuizQuestion`、`PracticeTask`、`EvaluationResult` 和
+  `MasteryProfile`，为 V0.7 掌握度闭环建立严格数据边界；
+- 自适应工作流和掌握度模型均有自动化测试，
+  当前完整测试集为 **78 passed**。
 
 
 
@@ -343,7 +349,7 @@ RepoMentor 会将其标记为：
 
 ## V0.6 自适应工作流
 
-基于 LangGraph 把 V0.4 的证据层能力组织成自适应工作流。
+基于 LangGraph 把 V0.4 的证据层能力组织成已完成的自适应工作流。
 
 ### 共享状态 AgentState
 
@@ -367,22 +373,31 @@ State 不保存 API Key 等敏感信息，
 
 ### 十个工作流节点
 
-```text
-START
-→ inspect_request（校验原始请求）
-  ├─ 缺少字段 → request_clarification → END
-  └─ 输入完整 → analyze_learner
-                 → analyze_target
-                 → collect_evidence
-                    ├─ 内容证据充分 → generate_roadmap
-                    │                    → confirm_roadmap
-                    │                       ├─ approve → END
-                    │                       └─ revise
-                    │                           → apply_human_revision
-                    │                           → analyze_learner（重新生成）
-                    ├─ 仍可补读 → read_more_evidence ─┐
-                    │                                └→ 再次证据路由
-                    └─ 达到上限 → conservative_evidence_stop → END
+```mermaid
+flowchart TD
+    START((START)) --> inspect{inspect_request}
+
+    inspect -->|ready| learner[analyze_learner]
+    inspect -->|needs_clarification| clarification[request_clarification]
+    clarification --> END((END))
+
+    learner --> target[analyze_target]
+    target --> evidence{collect_evidence}
+
+    evidence -->|enough_evidence| generate[generate_roadmap]
+    evidence -->|read_more| read_more{read_more_evidence}
+    evidence -->|stop| conservative[conservative_evidence_stop]
+
+    read_more -->|enough_evidence| generate
+    read_more -->|read_more| read_more
+    read_more -->|stop| conservative
+
+    conservative --> END
+    generate --> confirm{confirm_roadmap}
+
+    confirm -->|approved| END
+    confirm -->|revision_requested| revision[apply_human_revision]
+    revision --> learner
 ```
 
 `generate_roadmap` 是当前唯一调用 LLM 的工作流节点。
@@ -419,12 +434,42 @@ START
 关闭 Python 进程后 checkpoint 会丢失；生产环境需要换成
 SQLite、PostgreSQL 等持久化 Checkpointer。
 
+Checkpoint 使用 `JsonPlusSerializer` 的精确类型白名单，
+只允许恢复当前 `AgentState` 中实际使用的 RepoMentor 自定义模型，
+严格模式下不会放开任意 Python 类型反序列化。
+
 节点与图均有单元测试；LLM 依赖通过 monkeypatch 打桩，
 测试不花钱、不联网、可重复。
 
+### V0.6 离线演示
+
+`demo_adaptive_flow.py` 直接调用正式工作流公开入口，
+不再复制一份简化图。演示覆盖：
+
+- 生成结构化 `LearningRoadmap`；
+- 在 `confirm_roadmap` 中断；
+- 批准当前路线；
+- 修改学习者难度后重新分析和生成；
+- 使用相同 `thread_id` 从 checkpoint 恢复。
+
+## V0.7 掌握度模型
+
+V0.7 当前完成了掌握度闭环的数据模型基础：
+
+- `QuizQuestion`：保存概念题和代码定位题；
+- `PracticeTask`：保存需要提交代码、测试、图示或说明的实践任务；
+- `EvaluationResult`：保存规则、模型或人工评估结果；
+- `MasteryProfile`：汇总知识点分数、优势、薄弱点和单项结果。
+
+每道题和实践任务都必须关联当前路线任务、真实仓库来源和知识点。
+`EvaluationResult` 会校验得分、最高分、状态和评分方式的一致性；
+`MasteryProfile` 会校验知识点分数范围和评估项目唯一性。
+`AgentState.mastery` 已由临时 `dict` 占位升级为
+`MasteryProfile | None`。
+
 ## 当前限制
 
-当前项目处于 V0.6 自适应工作流开发阶段（V0.4 证据层已稳定）。
+当前项目已完成 V0.6 自适应工作流，正在开发 V0.7 掌握度闭环。
 
 主要限制包括：
 
@@ -445,27 +490,35 @@ SQLite、PostgreSQL 等持久化 Checkpointer。
 
 ## 当前演示效果
 
-目前可以调用 DeepSeek 模型，并连续获得两次回复。
+当前 V0.6 演示可以在不调用真实 LLM 的情况下运行正式工作流，
+并交互式批准路线或修改学习难度。
 
 示例输出：
 
 ```text
-==============================
-第 1 次模型调用
-==============================
-AI Agent 是一种能够感知环境、自主决策并采取行动以达成特定目标的智能体。
+== 工作流已暂停 ==
+当前目标：理解目录树扫描
+当前水平：beginner
+修订次数：0
 
-==============================
-第 2 次模型调用
-==============================
-AI Agent 是一种能够感知环境、自主决策并采取行动以完成特定目标的智能体。
+请输入 approve 批准，或 revise 修改难度：revise
+请输入新的技术水平：intermediate
+
+== 工作流已暂停 ==
+当前水平：intermediate
+修订次数：1
+
+== 最终路线已批准 ==
+确认状态：approved
+V0.6 ADAPTIVE WORKFLOW DEMO PASSED
 ```
 
 当前测试说明：
 
 ## Tests
 
-项目使用 `pytest` 验证仓库证据层、Tool Calling 与 V0.6 自适应工作流的核心行为。
+项目使用 `pytest` 验证仓库证据层、Tool Calling、V0.6 自适应工作流
+与 V0.7 掌握度模型的核心行为。
 
 当前测试覆盖：
 
@@ -503,6 +556,16 @@ AI Agent 是一种能够感知环境、自主决策并采取行动以完成特�
 - 修改目标后会重新生成路线、再次进入确认，并保留修订次数；
 - 整合测试通过 monkeypatch 隔离 LLM 和文件读取依赖，
   保持离线、可重复执行。
+
+测试还覆盖了 V0.7 掌握度模型：
+
+- 概念题、代码定位题和实践任务都能结构化保存；
+- 题目和实践任务必须记录路线任务、仓库来源和知识点；
+- 实际得分不能超过最高分；
+- 已评分状态必须提供得分，待人工复核必须使用人工评分方式；
+- 知识点掌握度必须在 0 到 1 之间；
+- 同一评估项目不能重复计入掌握度画像；
+- 初始 `AgentState.mastery` 为 `None`，不伪造尚未产生的评估结果。
 
 运行全部测试：
 
@@ -551,6 +614,7 @@ repo-mentor/
 │   ├── demo_repo/
 │   └── evaluation/
 ├── docs/
+│   ├── design-decisions.md
 │   ├── learning-log.md
 │   ├── product-positioning.md
 │   └── prompt-experiments.md
@@ -587,6 +651,7 @@ repo-mentor/
 │   ├── test_target_tool_calling.py
 │   ├── test_workflow_state.py
 │   ├── test_adaptive_nodes.py
+│   ├── test_assessment_models.py
 │   ├── test_roadmap_confirmation.py
 │   └── test_adaptive_workflow.py
 ├── pytest.ini
@@ -644,9 +709,11 @@ TEMPERATURE：模型生成随机性，当前建议设置为 0.2
 pip install -r requirements.txt
 ```
 
-运行当前版本：
+运行 V0.6 离线交互演示：
 
-```bash
-python -m src.repo_mentor.config
+```powershell
+$env:PYTHONPATH = (Resolve-Path .\src).Path
+$env:LANGGRAPH_STRICT_MSGPACK = "true"
+python -m repo_mentor.demo_adaptive_flow
 ```
 

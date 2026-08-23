@@ -24,6 +24,15 @@ from repo_mentor.models import (
     TargetTask,
 )
 
+from repo_mentor.models import (
+    LearnerProfile,
+    LearningRoadmap,
+    MasteryProfile,
+    RepositoryEvidence,
+    RoadmapConfirmation,
+    TargetTask,
+)
+
 class AgentState(TypedDict, total=False):
     """所有节点共享的状态。字段均为可选，从空 dict 起步。"""
 
@@ -44,8 +53,8 @@ class AgentState(TypedDict, total=False):
     # ---------- 输出 ----------
     roadmap: LearningRoadmap | None                 # 产生: generate_roadmap; 消费: 最终输出
 
-    # ---------- 掌握度（V0.7 再定义正式模型，今天用 dict 占位） ----------
-    mastery: dict[str, Any]                  # 产生: evaluate_answers/update_profile; 消费: replan
+    # 产生：evaluate_answers/update_profile；消费：replan
+    mastery: MasteryProfile | None
 
     # ---------- 运行时 ----------
     messages: Annotated[list, add_messages]  # 产生/消费: 所有节点, LLM 对话历史
@@ -86,6 +95,7 @@ def create_initial_state(
         "learner_profile":learner_profile,
         "target_task":target_task,
         "repo_evidence":[],
+        "mastery": None,
         "messages":[],
         "errors":[],
         "step_count": 0,

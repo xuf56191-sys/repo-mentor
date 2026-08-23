@@ -38,6 +38,34 @@ EvidenceType = Literal[
     "docs",
 ]
 
+QuizQuestionType = Literal[
+    "concept",
+    "code_location",
+]
+
+AssessmentDifficulty = Literal[
+    "beginner",
+    "intermediate",
+    "advanced",
+]
+
+AssessmentItemType = Literal[
+    "quiz_question",
+    "practice_task",
+]
+
+EvaluationMethod = Literal[
+    "rule",
+    "model",
+    "human",
+]
+
+EvaluationStatus = Literal[
+    "evaluated",
+    "needs_human_review",
+    "uncertain",
+]
+
 class StrictModel(BaseModel):
     """RepoMentor严格数据模型基类。"""
 
@@ -219,6 +247,229 @@ class EvidenceSource(StrictModel):
         description="当前证据可信度",
     )
 
+
+class QuizQuestion(StrictModel):
+    """与当前路线任务及仓库证据相关的结构化测验题。"""
+
+    question_id: str = Field(
+        min_length=1,
+        description="题目在本次测验中的唯一标识",
+    )
+    question_type: QuizQuestionType = Field(
+        description="概念解释题或代码定位题",
+    )
+    prompt: str = Field(
+        min_length=5,
+        description="向学习者展示的问题",
+    )
+    expected_answer: str = Field(
+        min_length=2,
+        description="用于评估回答的参考答案",
+    )
+    difficulty: AssessmentDifficulty = Field(
+        description="题目难度",
+    )
+    related_task_title: str = Field(
+        min_length=2,
+        description="题目对应的当前路线任务标题",
+    )
+    evidence_sources: list[EvidenceSource] = Field(
+        min_length=1,
+        description="支持该题目的真实仓库来源",
+    )
+    knowledge_points: list[str] = Field(
+        min_length=1,
+        description="该题考查的知识点",
+    )
+    max_score: int = Field(
+        default=10,
+        ge=1,
+        le=100,
+        description="该题最高分",
+    )
+
+class PracticeTask(StrictModel):
+    """与当前路线和仓库证据相关的结构化实践任务。"""
+
+    practice_id: str = Field(
+        min_length=1,
+        description="实践任务在本次评估中的唯一标识",
+    )
+    title: str = Field(
+        min_length=2,
+        description="实践任务标题",
+    )
+    instructions: str = Field(
+        min_length=5,
+        description="学习者需要执行的具体操作",
+    )
+    expected_outcome: str = Field(
+        min_length=5,
+        description="完成实践后应该达到的结果",
+    )
+    deliverable: str = Field(
+        min_length=2,
+        description="学习者需要提交的代码、测试或说明",
+    )
+    difficulty: AssessmentDifficulty = Field(
+        description="实践任务难度",
+    )
+    related_task_title: str = Field(
+        min_length=2,
+        description="实践任务对应的当前路线任务标题",
+    )
+    evidence_sources: list[EvidenceSource] = Field(
+        min_length=1,
+        description="实践任务依据的真实仓库来源",
+    )
+    knowledge_points: list[str] = Field(
+        min_length=1,
+        description="该实践任务训练的知识点",
+    )
+    completion_criteria: list[str] = Field(
+        min_length=1,
+        description="可验证的完成条件",
+    )
+    estimated_hours: float = Field(
+        ge=0.25,
+        le=12,
+        description="预计完成时间",
+    )
+    requires_human_review: bool = Field(
+        default=True,
+        description="实践产物是否需要人工检查",
+    )
+
+class EvaluationResult(StrictModel):
+    """一道测验题或实践任务的结构化评估结果。"""
+
+    item_id: str = Field(
+        min_length=1,
+        description="被评估题目或实践任务的标识",
+    )
+    item_type: AssessmentItemType = Field(
+        description="被评估的是测验题还是实践任务",
+    )
+    learner_response: str | None = Field(
+        default=None,
+        description="学习者提交的答案或实践结果说明",
+    )
+    status: EvaluationStatus = Field(
+        description="已评分、待人工复核或评分不确定",
+    )
+    evaluation_method: EvaluationMethod = Field(
+        description="规则、模型或人工评分",
+    )
+    score: float | None = Field(
+        default=None,
+        ge=0,
+        description="实际得分；尚未评分时为空",
+    )
+    max_score: float = Field(
+        gt=0,
+        le=100,
+        description="最高分",
+    )
+    feedback: str = Field(
+        min_length=2,
+        description="具体评分理由和改进建议",
+    )
+    knowledge_points: list[str] = Field(
+        min_length=1,
+        description="本次结果涉及的知识点",
+    )
+    source_files: list[str] = Field(
+        min_length=1,
+        description="评估内容对应的仓库来源文件",
+    )
+
+    @model_validator(mode="after")
+    def validate_evaluation_result(
+        self,
+    ) -> "EvaluationResult":
+        """校验评分状态、评分方式和分数的一致性。"""
+        if (
+            self.score is not None
+            and self.score > self.max_score
+        ):
+            raise ValueError("实际得分不能高于最高分")
+
+        if (
+            self.status == "evaluated"
+            and self.score is None
+        ):
+            raise ValueError("已完成评分时必须提供实际得分")
+
+        if (
+            self.status == "needs_human_review"
+            and self.evaluation_method != "human"
+        ):
+            raise ValueError(
+                "待人工复核时 evaluation_method 必须是 human"
+            )
+
+        return self
+
+class MasteryProfile(StrictModel):
+    """围绕当前目标任务形成的学习者掌握度汇总。"""
+
+    profile_id: str = Field(
+        min_length=1,
+        description="本次掌握度画像的唯一标识",
+    )
+    target_task_title: str = Field(
+        min_length=2,
+        description="掌握度画像对应的目标任务",
+    )
+    overall_score: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="当前目标的总体掌握度，范围为 0 到 1",
+    )
+    knowledge_scores: dict[str, float] = Field(
+        default_factory=dict,
+        description="各知识点的掌握度，范围为 0 到 1",
+    )
+    strengths: list[str] = Field(
+        default_factory=list,
+        description="已经掌握较好的知识点",
+    )
+    weak_points: list[str] = Field(
+        default_factory=list,
+        description="仍需加强的知识点",
+    )
+    evaluation_results: list[EvaluationResult] = Field(
+        default_factory=list,
+        description="构成本次掌握度画像的评估结果",
+    )
+
+    @model_validator(mode="after")
+    def validate_mastery_profile(
+        self,
+    ) -> "MasteryProfile":
+        """校验知识点分数范围和评估结果唯一性。"""
+        for knowledge_point, score in (
+            self.knowledge_scores.items()
+        ):
+            if not knowledge_point.strip():
+                raise ValueError("知识点名称不能为空")
+
+            if not 0.0 <= score <= 1.0:
+                raise ValueError(
+                    "知识点掌握度必须在 0 到 1 之间"
+                )
+
+        item_ids = [
+            result.item_id
+            for result in self.evaluation_results
+        ]
+
+        if len(item_ids) != len(set(item_ids)):
+            raise ValueError(
+                "同一个评估项目不能重复计入掌握度画像"
+            )
+
+        return self
 
 class LearningTask(StrictModel):
     """一项可以执行和验收的学习任务。"""

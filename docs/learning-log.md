@@ -2418,3 +2418,218 @@ HITL 不是在普通函数中临时调用一次 `input()`，
 * 设计回答记录与掌握度评估 State；
 * 将掌握度变化连接到后续路线重规划；
 * 在需要跨进程恢复时，将 `InMemorySaver` 替换为持久化 Checkpointer。
+
+---
+
+## 2026-08-20：V0.6 集成与图示
+
+### 今天的目标
+
+复习 State、Node、Edge、Conditional Edge、有限循环和 Checkpoint，
+让流程图、正式代码、测试、设计决策和演示程序保持一致，
+完成 V0.6 自适应工作流阶段验收。
+
+### 今天完成
+
+* 审核正式图中的 10 个业务节点和全部条件分支；
+* 在 README 中用 Mermaid 绘制输入澄清、证据补读、
+  保守停止和人工修订闭环；
+* 新增 `docs/design-decisions.md`，记录采用单一状态图而不是
+  自由式多 Agent 的原因、代价和重新评估条件；
+* 将旧的 4 节点 `demo_adaptive_flow.py` 升级为正式 V0.6 演示；
+* 演示程序改为调用 `build_adaptive_graph()`、
+  `start_adaptive_workflow()` 和 `resume_adaptive_workflow()`；
+* 将硬编码仓库绝对路径改为基于 `__file__` 的可移植路径；
+* 为离线演示实现返回真实 `LearningRoadmap` 的契约一致 Fake；
+* 验证直接批准路线的执行路径；
+* 验证修改学习水平后重新生成、再次确认和最终批准的执行路径；
+* 为 Checkpoint 配置自定义类型的精确 Msgpack 反序列化白名单；
+* 在 `LANGGRAPH_STRICT_MSGPACK=true` 下验证中断恢复；
+* 当日 V0.6 基线共 66 个测试，全部通过。
+
+### 1. 图、代码与文档必须表达同一个状态机
+
+Mermaid 图不是装饰性图片，而是工作流架构的一种可审查表达。
+图中的每一条固定边或条件边都应该能在 `build_adaptive_graph()`
+中找到对应代码。
+
+```text
+START
+→ inspect_request
+  ├─ needs_clarification → request_clarification → END
+  └─ ready → analyze_learner → analyze_target → collect_evidence
+```
+
+证据分支包含 `enough_evidence`、`read_more` 和 `stop`；
+确认分支包含 `approved` 和 `revision_requested`。
+如果图中缺少补读自循环或修订后回到分析节点，
+就不能真实表达 V0.6 的行为。
+
+### 2. 为什么当前不使用自由式多 Agent
+
+当前流程存在明确的数据依赖：学习者与目标分析先于证据选择，
+证据先于路线，路线先于人工确认。
+显式状态图能直接表达这些依赖，并让路由、停止条件和权限边界可测试。
+
+自由式多 Agent 会引入更多模型规划、角色交接、上下文同步和随机决策，
+但当前流程没有足够的独立并行任务来抵消这些成本。
+因此本阶段选择一个共享 `AgentState` 的确定性图，
+并记录未来在存在真正独立角色、不同工具或可并行任务时再重新评估。
+
+### 3. 演示程序应该调用公开入口
+
+旧演示重新组装了一个 4 节点图。正式图增加澄清、循环和 checkpoint 后，
+旧演示仍能运行，却不能证明当前产品流程正确。
+
+升级后的演示只替换 LLM 生成器，图结构、节点、路由和 Checkpointer
+全部使用生产实现。这保证演示测试的确是当前系统，而不是另一份复制代码。
+
+### 4. Fake 必须保持接口契约
+
+真实生成节点返回 `LearningRoadmap`，下游确认节点需要调用
+`roadmap.model_dump()`。因此离线 Fake 不能返回普通字符串，
+而要构造完整的 `LearningRoadmap → DailyPlan → LearningTask
+→ EvidenceSource` 嵌套模型。
+
+Fake 可以省略真实网络调用和模型随机性，
+但不能改变参数和返回类型，否则只能证明假流程能运行。
+
+### 5. Checkpoint 反序列化白名单
+
+严格模式验证发现 Checkpoint 中包含 RepoMentor 自定义 Pydantic 模型和
+`EvidenceBudget`。默认宽松模式会恢复这些类型，但提示未来版本将阻止
+未注册类型。
+
+本项目使用 `JsonPlusSerializer(allowed_msgpack_modules=...)`
+精确列出 State 中实际保存的类型，而不是设置为 `True` 允许任意模块。
+这样既能恢复 checkpoint，又保持明确的反序列化安全边界。
+
+### 测试与验收
+
+两条交互式演示均通过：
+
+```text
+approve → approved → END
+```
+
+```text
+revise → intermediate → revision_count=1
+→ 重新生成 → 再次 interrupt → approve → END
+```
+
+严格 Msgpack 模式下不再出现未注册类型或阻止反序列化警告。
+Mermaid、代码、README 和演示表达同一 10 节点工作流，
+测试数量远高于计划要求的 10 个。V0.6 阶段验收完成。
+
+### 核心认识
+
+阶段集成不是简单把已有代码放在一起，
+而是检查模型契约、图结构、文档、演示、安全配置和自动化测试
+是否共同描述同一个系统。
+
+---
+
+## 2026-08-21：测验与任务模型
+
+### 今天的目标
+
+理解概念题、代码定位题和实践任务分别评估什么，
+为 V0.7 定义可追溯、可校验的测验、任务、评估结果和掌握度模型。
+
+### 今天完成
+
+* 定义 `QuizQuestionType` 和 `AssessmentDifficulty`；
+* 新增 `QuizQuestion`，支持概念题和代码定位题；
+* 新增 `PracticeTask`，记录操作说明、交付物和完成标准；
+* 新增 `EvaluationResult`，记录答案、评分方式、状态、得分和反馈；
+* 新增 `MasteryProfile`，汇总知识点分数、优势、薄弱点和评估结果；
+* 所有题目和实践任务都记录路线任务、仓库来源和知识点；
+* 使用模型验证器保证得分、状态、评分方式和掌握度范围一致；
+* 将 `AgentState.mastery` 从临时 `dict` 升级为
+  `MasteryProfile | None`；
+* 初始状态使用 `mastery=None`，不伪造尚未产生的评估结果；
+* 新增 11 个评估模型测试和 1 个 State 测试；
+* 最终完整测试集共 78 个测试，全部通过。
+
+### 1. 三类评估内容的边界
+
+概念题要求学习者解释“是什么、为什么、如何工作”；
+代码定位题要求指出真实文件、函数或类；
+实践任务要求提交代码、测试、图示或说明文档等可检查产物。
+
+前两者使用 `QuizQuestion`，通过 `question_type` 区分；
+实践任务使用独立的 `PracticeTask`，因为它需要 `deliverable`、
+`completion_criteria` 和人工复核信息，不能只依靠参考答案判断。
+
+### 2. 来源可追溯性
+
+`related_task_title` 把题目连接到当前学习路线，
+`evidence_sources` 把题目连接到真实仓库文件，
+`knowledge_points` 说明该题实际评估什么能力。
+
+这三个字段共同防止生成与当前目标无关、仓库中不存在或无法解释来源的题目。
+例如 Mermaid 实践任务关联
+`src/repo_mentor/adaptive_workflow.py`，并记录
+`StateGraph`、`Conditional Edge` 和 `Checkpoint` 知识点。
+
+### 3. EvaluationResult 的一致性规则
+
+单项结果支持 `rule`、`model` 和 `human` 三种评分方式，
+并区分 `evaluated`、`needs_human_review` 和 `uncertain` 状态。
+
+模型保证：
+
+* 实际得分不能高于最高分；
+* `evaluated` 必须提供实际得分；
+* `needs_human_review` 必须使用 `human` 评分方式。
+
+这些约束把业务规则放进数据边界，避免下游节点接收到互相矛盾的结果。
+
+### 4. MasteryProfile 是聚合结果
+
+`EvaluationResult` 表示一道题或一个实践任务的单次结果；
+`MasteryProfile` 表示围绕当前目标聚合后的能力画像。
+
+`knowledge_scores` 的每个值必须位于 0 到 1，
+同一个 `item_id` 不能重复计入画像。
+`overall_score` 不强制等于知识点简单平均值，
+因为未来可能根据目标重要性使用不同权重。
+
+### 5. None 与零分不是同一状态
+
+初始 `mastery=None` 表示尚未产生任何评估证据；
+`MasteryProfile(overall_score=0)` 表示已经评估并确认当前掌握度为零。
+如果用空字典或零分画像表示“尚未评估”，
+后续重新规划节点就无法区分缺少数据和真实薄弱。
+
+### 测试与验收
+
+新增测试证明：
+
+* 概念题、代码定位题和实践任务都能序列化；
+* 题目必须包含真实仓库来源和知识点；
+* Mermaid 实践任务能保存交付物和完成条件；
+* 非法分数和互相矛盾的评分状态会被拒绝；
+* 掌握度范围和评估结果唯一性受到校验；
+* 初始 State 不会创建虚假的掌握度画像。
+
+最终全量结果：
+
+```text
+78 passed in 3.13s
+```
+
+8 月 21 日验收标准全部通过。
+
+### 核心认识
+
+评估模型不只是保存问题文本。
+它需要同时表达评估对象、真实来源、知识点、参考标准、评分状态
+和聚合关系，才能成为后续测验生成、答案评估与路线重规划的可靠输入。
+
+### 下一步
+
+* 根据确认后的 `LearningRoadmap` 和仓库证据生成测验与实践任务；
+* 实现 `generate_assessment` 节点；
+* 保证题目难度与学习者基础匹配；
+* 为参考答案保留可审查的仓库来源。

@@ -19,9 +19,37 @@ from repo_mentor.workflow_state import (
     AgentState,
     create_initial_state,
 )
+from langgraph.checkpoint.serde.jsonplus import (
+    JsonPlusSerializer,
+)
 # LangGraph 整体执行的安全保险。
 # 正常业务循环由 AgentState.max_steps 控制。
 GRAPH_RECURSION_LIMIT = 20
+
+# Checkpoint 只允许重建 AgentState 中实际保存的项目类型。
+# 使用精确白名单，避免允许任意 Python 类型反序列化。
+CHECKPOINT_ALLOWED_MSGPACK_MODULES = [
+    ("repo_mentor.models", "LearnerProfile"),
+    ("repo_mentor.models", "TargetTask"),
+    ("repo_mentor.models", "RepositoryEvidence"),
+    ("repo_mentor.models", "LearningRoadmap"),
+    ("repo_mentor.models", "RoadmapConfirmation"),
+    ("repo_mentor.models", "MasteryProfile"),
+    (
+        "repo_mentor.repository_safeguards",
+        "EvidenceBudget",
+    ),
+]
+
+
+def create_memory_checkpointer() -> InMemorySaver:
+    """创建带自定义类型白名单的开发期内存 Checkpointer。"""
+    serializer = JsonPlusSerializer(
+        allowed_msgpack_modules=(
+            CHECKPOINT_ALLOWED_MSGPACK_MODULES
+        ),
+    )
+    return InMemorySaver(serde=serializer)
 
 
 def make_thread_config(thread_id: str) -> dict[str, Any]:
@@ -42,7 +70,7 @@ def build_adaptive_graph(
 ):
     """组装并编译基础图，返回支持 checkpoint 的 app。"""
     if checkpointer is None:
-        checkpointer = InMemorySaver()
+        checkpointer = create_memory_checkpointer()
 
     graph = StateGraph(AgentState)
 
