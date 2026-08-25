@@ -13,6 +13,14 @@ from repo_mentor.models import (
     LearnerProfile,
     RoadmapConfirmation,
     TargetTask,
+    DailyPlan,
+    EvidenceSource,
+    LearningRoadmap,
+    LearningTask,
+    RepositoryEvidence,
+    AssessmentPackage,
+    PracticeTask,
+    QuizQuestion,
 )
 from repo_mentor.adaptive_nodes import (
     analyze_learner,
@@ -25,8 +33,10 @@ from repo_mentor.adaptive_nodes import (
     conservative_evidence_stop,
     confirm_roadmap,
     apply_human_revision,
+    generate_assessment,
+    evaluate_answers,
 )
-
+import pytest
 
 def make_learner() -> LearnerProfile:
     """构造一个可复用的学习者画像（测试数据）。"""
@@ -47,6 +57,111 @@ def make_target() -> TargetTask:
         description="理解仓库目录树生成流程",
         task_type="understand_module",
         expected_outcome="能说明目录树生成流程",
+    )
+
+def make_learning_roadmap() -> LearningRoadmap:
+    """构造包含两个任务的路线，用于验证节点选择首个任务。"""
+    source = EvidenceSource(
+        file_path="src/repo_mentor/adaptive_workflow.py",
+        evidence_type="source",
+        reason="该文件定义正式工作流",
+        confidence=1.0,
+    )
+
+    first_task = LearningTask(
+        title="理解自适应工作流",
+        objective="能够解释状态图的节点和路由流程",
+        evidence_sources=[source],
+        reading_task="阅读自适应工作流源码",
+        code_location_task="定位工作流构造函数",
+        practice_task="绘制工作流执行路径",
+        completion_criteria=["能解释节点顺序"],
+        estimated_hours=1.0,
+    )
+    second_task = LearningTask(
+        title="理解评估模型",
+        objective="能够解释结构化评估模型",
+        evidence_sources=[source],
+        reading_task="阅读评估模型定义",
+        code_location_task="定位 AssessmentPackage",
+        practice_task="构造一个评估包",
+        completion_criteria=["能解释评估包结构"],
+        estimated_hours=1.0,
+    )
+
+    return LearningRoadmap(
+        learner_profile=make_learner(),
+        target_task=make_target(),
+        learner_summary="具备 Python 基础，需要学习 LangGraph",
+        skill_gaps=["langgraph"],
+        daily_plans=[
+            DailyPlan(
+                day=1,
+                theme="工作流",
+                tasks=[first_task],
+                daily_outcome="理解自适应工作流",
+            ),
+            DailyPlan(
+                day=2,
+                theme="评估模型",
+                tasks=[second_task],
+                daily_outcome="理解评估模型结构",
+            ),
+        ],
+        total_estimated_hours=2.0,
+    )
+
+def make_node_assessment() -> AssessmentPackage:
+    """构造 evaluate_answers 节点测试使用的评估包。"""
+    source = EvidenceSource(
+        file_path="src/repo_mentor/adaptive_workflow.py",
+        evidence_type="source",
+        reason="该文件定义正式工作流",
+        confidence=1.0,
+    )
+
+    concept = QuizQuestion(
+        question_id="question-concept",
+        question_type="concept",
+        prompt="为什么恢复需要相同 thread_id？",
+        expected_answer="用于定位对应 checkpoint",
+        difficulty="beginner",
+        related_task_title="理解自适应工作流",
+        evidence_sources=[source],
+        knowledge_points=["thread_id"],
+    )
+    location = QuizQuestion(
+        question_id="question-location",
+        question_type="code_location",
+        prompt="工作流构造函数位于哪个文件？",
+        expected_answer=(
+            "src/repo_mentor/adaptive_workflow.py"
+        ),
+        difficulty="beginner",
+        related_task_title="理解自适应工作流",
+        evidence_sources=[source],
+        knowledge_points=["代码定位"],
+    )
+    practice = PracticeTask(
+        practice_id="practice-workflow",
+        title="补充工作流测试",
+        instructions="为工作流增加节点结构测试",
+        expected_outcome="测试能够验证正式节点集合",
+        deliverable="一个 pytest 测试函数",
+        difficulty="beginner",
+        related_task_title="理解自适应工作流",
+        evidence_sources=[source],
+        knowledge_points=["pytest"],
+        completion_criteria=["测试能够通过"],
+        estimated_hours=0.5,
+    )
+
+    return AssessmentPackage(
+        assessment_id="assessment-node",
+        related_task_title="理解自适应工作流",
+        difficulty="beginner",
+        questions=[concept, location],
+        practice_task=practice,
     )
 
 class FakeRoadmap:
@@ -586,3 +701,223 @@ def test_apply_human_revision_rebuilds_learner_profile():
     # 目标没有修改。
     assert update["target_task"] == target
     assert update["revision_count"] == 1
+    assert update["assessment"] is None
+    assert update["learner_answers"] == {}
+    assert update["evaluation_results"] == []
+    assert update["mastery"] is None
+
+def test_generate_assessment_uses_first_roadmap_task(
+    monkeypatch,
+):
+    """节点应选择路线首个任务并写回 assessment。"""
+    from repo_mentor import adaptive_nodes
+
+    roadmap = make_learning_roadmap()
+    evidence = [
+        RepositoryEvidence(
+            source_path=(
+                "src/repo_mentor/adaptive_workflow.py"
+            ),
+            snippet="def build_adaptive_graph(): ...",
+            reason="与首个路线任务相关",
+            confidence=1.0,
+        )
+    ]
+    fake_assessment = object()
+    captured = {}
+
+    def fake_generator(
+        *,
+        learner_profile,
+        learning_task,
+        repo_evidence,
+    ):
+        captured["learner_profile"] = learner_profile
+        captured["learning_task"] = learning_task
+        captured["repo_evidence"] = repo_evidence
+        return fake_assessment
+
+    monkeypatch.setattr(
+        adaptive_nodes,
+        "generate_structured_assessment",
+        fake_generator,
+    )
+
+    update = generate_assessment({
+        "roadmap": roadmap,
+        "learner_profile": roadmap.learner_profile,
+        "repo_evidence": evidence,
+    })
+
+    assert update["assessment"] is fake_assessment
+    assert (
+        captured["learning_task"].title
+        == "理解自适应工作流"
+    )
+    assert (
+        captured["learner_profile"]
+        == roadmap.learner_profile
+    )
+    assert captured["repo_evidence"] is evidence
+
+
+def test_generate_assessment_requires_roadmap():
+    """没有已生成路线时，不得调用评估生成器。"""
+    with pytest.raises(
+        ValueError,
+        match="必须先存在 LearningRoadmap",
+    ):
+        generate_assessment({
+            "roadmap": None,
+        })
+
+def test_evaluate_answers_dispatches_three_item_types(
+    monkeypatch,
+):
+    """三类项目必须进入各自的评估器。"""
+    from repo_mentor import adaptive_nodes
+
+    assessment = make_node_assessment()
+    concept_result = object()
+    location_result = object()
+    practice_result = object()
+    calls = []
+
+    def fake_concept(question, answer):
+        calls.append((
+            "concept",
+            question.question_id,
+            answer,
+        ))
+        return concept_result
+
+    def fake_location(question, answer):
+        calls.append((
+            "code_location",
+            question.question_id,
+            answer,
+        ))
+        return location_result
+
+    def fake_practice(practice, submission):
+        calls.append((
+            "practice",
+            practice.practice_id,
+            submission,
+        ))
+        return practice_result
+
+    monkeypatch.setattr(
+        adaptive_nodes,
+        "evaluate_concept_answer",
+        fake_concept,
+    )
+    monkeypatch.setattr(
+        adaptive_nodes,
+        "evaluate_code_location_answer",
+        fake_location,
+    )
+    monkeypatch.setattr(
+        adaptive_nodes,
+        "mark_practice_for_human_review",
+        fake_practice,
+    )
+
+    update = evaluate_answers({
+        "assessment": assessment,
+        "learner_answers": {
+            "question-concept": "用于恢复状态",
+            "question-location": (
+                "src/repo_mentor/adaptive_workflow.py"
+            ),
+            "practice-workflow": "已提交测试代码",
+        },
+    })
+
+    assert calls == [
+        (
+            "concept",
+            "question-concept",
+            "用于恢复状态",
+        ),
+        (
+            "code_location",
+            "question-location",
+            "src/repo_mentor/adaptive_workflow.py",
+        ),
+        (
+            "practice",
+            "practice-workflow",
+            "已提交测试代码",
+        ),
+    ]
+    assert update["evaluation_results"] == [
+        concept_result,
+        location_result,
+        practice_result,
+    ]
+
+
+def test_evaluate_answers_rejects_unknown_item_id():
+    """旧测验或拼错的题目 ID 不能被静默忽略。"""
+    assessment = make_node_assessment()
+
+    with pytest.raises(
+        ValueError,
+        match="未知评估项目.*old-question",
+    ):
+        evaluate_answers({
+            "assessment": assessment,
+            "learner_answers": {
+                "old-question": "旧题答案",
+            },
+        })
+
+
+def test_evaluate_answers_treats_missing_answers_as_empty(
+    monkeypatch,
+):
+    """缺失答案应交给各评估器保守处理。"""
+    from repo_mentor import adaptive_nodes
+
+    assessment = make_node_assessment()
+    received = []
+
+    def record_concept(question, answer):
+        received.append(("concept", answer))
+        return object()
+
+    def record_location(question, answer):
+        received.append(("location", answer))
+        return object()
+
+    def record_practice(practice, submission):
+        received.append(("practice", submission))
+        return object()
+
+    monkeypatch.setattr(
+        adaptive_nodes,
+        "evaluate_concept_answer",
+        record_concept,
+    )
+    monkeypatch.setattr(
+        adaptive_nodes,
+        "evaluate_code_location_answer",
+        record_location,
+    )
+    monkeypatch.setattr(
+        adaptive_nodes,
+        "mark_practice_for_human_review",
+        record_practice,
+    )
+
+    evaluate_answers({
+        "assessment": assessment,
+        "learner_answers": {},
+    })
+
+    assert received == [
+        ("concept", ""),
+        ("location", ""),
+        ("practice", ""),
+    ]

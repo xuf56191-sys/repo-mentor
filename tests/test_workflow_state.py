@@ -136,3 +136,28 @@ def test_initial_state_has_no_mastery_profile():
     )
 
     assert state["mastery"] is None
+
+def test_initial_state_has_assessment_defaults():
+    """新会话不应包含伪造的题目、答案或评分。"""
+    first = create_initial_state(
+        make_learner(),
+        make_target(),
+    )
+    second = create_initial_state(
+        make_learner(),
+        make_target(),
+    )
+
+    assert first["assessment"] is None
+    assert first["learner_answers"] == {}
+    assert first["evaluation_results"] == []
+
+    # 不同会话不能共享可变答案或评分列表。
+    assert (
+        first["learner_answers"]
+        is not second["learner_answers"]
+    )
+    assert (
+        first["evaluation_results"]
+        is not second["evaluation_results"]
+    )

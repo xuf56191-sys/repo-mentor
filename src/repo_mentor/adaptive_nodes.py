@@ -1,4 +1,4 @@
-"""V0.6 自适应工作流的核心节点。
+"""RepoMentor V0.6/V0.7 自适应工作流的核心节点。
 
 每个节点 = 函数(state) -> 局部更新 dict，LangGraph 负责 merge：
 
@@ -7,8 +7,10 @@
 - analyze_learner       ：分析学习者画像（纯规则，无 LLM）
 - analyze_target        ：分析目标任务关键词（纯规则）
 - collect_evidence      ：收集目标相关证据（复用 V0.4 证据层）
-- generate_roadmap      ：调用 LLM 生成学习路线（唯一需要 LLM 的节点）
+- generate_roadmap      ：调用 LLM 生成学习路线
 - confirm_roadmap       ：暂停图并等待用户确认路线
+- generate_assessment   ：调用 LLM 生成证据约束的评估包
+- evaluate_answers      ：组合规则、模型和人工复核结果
 
 节点间接力：
 generate_roadmap 产出路线
@@ -25,6 +27,7 @@ from repo_mentor.models import (
     RepositoryEvidence,
     TargetTask,
     RoadmapConfirmation,
+    AssessmentPackage,
 )
 from repo_mentor.repository_ranker import (
     extract_target_keywords,  # 从目标任务提取文件路径关键词
@@ -38,7 +41,14 @@ from repo_mentor.roadmap_generator import (
     generate_structured_roadmap,  # 现有路线生成器（内部调 LLM）
 )
 from repo_mentor.workflow_state import AgentState  # 共享状态定义
-
+from repo_mentor.assessment_generator import (
+    generate_structured_assessment,
+)
+from repo_mentor.assessment_evaluator import (
+    evaluate_code_location_answer,
+    evaluate_concept_answer,
+    mark_practice_for_human_review,
+)
 
 # ---------------- 节点 1：检查原始请求信息（纯规则，无 LLM） ----------------
 
@@ -578,6 +588,11 @@ def apply_human_revision(
 
         # 旧路线和旧确认结果失效
         "roadmap": None,
+        # 旧目标/难度产生的评估结果全部失效
+        "assessment": None,
+        "learner_answers": {},
+        "evaluation_results": [],
+        "mastery": None,
         "confirmation_status": "not_requested",
         "human_confirmation": None,
         "revision_count": (
@@ -589,4 +604,138 @@ def apply_human_revision(
         "missing_fields": [],
         "clarification_questions": [],
         "errors": Overwrite([]),
+    }
+
+# ---------------- 节点 11：生成证据约束的评估包 ----------------
+
+def generate_assessment(
+    state: AgentState,
+) -> dict:
+    """根据已批准路线的首个任务生成结构化评估。"""
+    roadmap = state.get("roadmap")
+
+    if roadmap is None:
+        raise ValueError(
+            "生成评估前必须先存在 LearningRoadmap"
+        )
+
+    # V0.7 当前先评估路线中的第一个任务。
+    # 后续增加 current_task_id 后再改为按进度选择。
+    learning_task = next(
+        (
+            task
+            for daily_plan in roadmap.daily_plans
+            for task in daily_plan.tasks
+        ),
+        None,
+    )
+
+    if learning_task is None:
+        raise ValueError(
+            "当前 LearningRoadmap 中没有可评估任务"
+        )
+
+    assessment = generate_structured_assessment(
+        learner_profile=state["learner_profile"],
+        learning_task=learning_task,
+        repo_evidence=state.get(
+            "repo_evidence",
+            [],
+        ),
+    )
+
+    return {
+        "assessment": assessment,
+    }
+
+# ---------------- 节点 12：组合评估学习者答案 ----------------
+
+def evaluate_answers(
+    state: AgentState,
+) -> dict:
+    """根据项目类型选择规则、模型或人工复核。"""
+    raw_assessment = state.get("assessment")
+
+    if raw_assessment is None:
+        raise ValueError(
+            "评估答案前必须先存在 AssessmentPackage"
+        )
+
+    # Checkpoint 恢复后可能得到模型或可校验字典，
+    # 节点边界统一恢复成严格模型。
+    assessment = AssessmentPackage.model_validate(
+        raw_assessment
+    )
+    learner_answers = state.get(
+        "learner_answers",
+        {},
+    )
+
+    expected_ids = {
+        question.question_id
+        for question in assessment.questions
+    }
+    expected_ids.add(
+        assessment.practice_task.practice_id
+    )
+
+    unknown_ids = (
+        set(learner_answers)
+        - expected_ids
+    )
+
+    if unknown_ids:
+        raise ValueError(
+            "学习者答案包含未知评估项目："
+            + "、".join(sorted(unknown_ids))
+        )
+
+    results = []
+
+    for question in assessment.questions:
+        answer = learner_answers.get(
+            question.question_id,
+            "",
+        )
+
+        if not isinstance(answer, str):
+            raise ValueError(
+                "学习者答案必须是字符串："
+                f"{question.question_id}"
+            )
+
+        if question.question_type == "concept":
+            result = evaluate_concept_answer(
+                question,
+                answer,
+            )
+        else:
+            result = evaluate_code_location_answer(
+                question,
+                answer,
+            )
+
+        results.append(result)
+
+    practice = assessment.practice_task
+    submission = learner_answers.get(
+        practice.practice_id,
+        "",
+    )
+
+    if not isinstance(submission, str):
+        raise ValueError(
+            "实践任务提交说明必须是字符串："
+            f"{practice.practice_id}"
+        )
+
+    results.append(
+        mark_practice_for_human_review(
+            practice,
+            submission,
+        )
+    )
+
+    return {
+        "evaluation_results": results,
     }

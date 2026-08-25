@@ -7,6 +7,7 @@ from repo_mentor.models import (
     MasteryProfile,
     PracticeTask,
     QuizQuestion,
+    AssessmentPackage,
 )
 
 
@@ -19,6 +20,49 @@ def make_source() -> EvidenceSource:
         confidence=1.0,
     )
 
+def make_question(
+    question_id: str,
+    question_type: str,
+    *,
+    difficulty: str = "beginner",
+    related_task_title: str = "理解 checkpoint",
+) -> QuizQuestion:
+    """构造评估包测试使用的题目。"""
+    return QuizQuestion(
+        question_id=question_id,
+        question_type=question_type,
+        prompt=f"请回答关于 {question_type} 的问题",
+        expected_answer="参考答案来自真实仓库证据",
+        difficulty=difficulty,
+        related_task_title=related_task_title,
+        evidence_sources=[make_source()],
+        knowledge_points=["checkpoint"],
+    )
+
+
+def make_practice(
+    *,
+    practice_id: str = "practice-checkpoint",
+    difficulty: str = "beginner",
+    related_task_title: str = "理解 checkpoint",
+) -> PracticeTask:
+    """构造评估包测试使用的实践任务。"""
+    return PracticeTask(
+        practice_id=practice_id,
+        title="补充 checkpoint 测试",
+        instructions="为 checkpoint 恢复增加一个测试",
+        expected_outcome="相同 thread_id 可以继续执行",
+        deliverable="一个 pytest 测试函数",
+        difficulty=difficulty,
+        related_task_title=related_task_title,
+        evidence_sources=[make_source()],
+        knowledge_points=["checkpoint", "thread_id"],
+        completion_criteria=[
+            "测试能够通过",
+            "使用相同 thread_id 恢复",
+        ],
+        estimated_hours=0.5,
+    )
 
 def make_evaluation(
     item_id: str = "question-checkpoint",
@@ -238,4 +282,103 @@ def test_mastery_rejects_duplicate_results():
                 result,
                 result,
             ],
+        )
+
+def test_assessment_package_contains_three_item_types():
+    package = AssessmentPackage(
+        assessment_id="assessment-checkpoint",
+        related_task_title="理解 checkpoint",
+        difficulty="beginner",
+        questions=[
+            make_question(
+                "question-concept",
+                "concept",
+            ),
+            make_question(
+                "question-location",
+                "code_location",
+            ),
+        ],
+        practice_task=make_practice(),
+    )
+
+    assert len(package.questions) == 2
+    assert {
+        question.question_type
+        for question in package.questions
+    } == {
+        "concept",
+        "code_location",
+    }
+    assert package.practice_task.requires_human_review is True
+
+
+def test_assessment_package_rejects_duplicate_question_types():
+    with pytest.raises(
+        ValidationError,
+        match="必须同时包含一题概念题和一题代码定位题",
+    ):
+        AssessmentPackage(
+            assessment_id="duplicate-types",
+            related_task_title="理解 checkpoint",
+            difficulty="beginner",
+            questions=[
+                make_question(
+                    "concept-one",
+                    "concept",
+                ),
+                make_question(
+                    "concept-two",
+                    "concept",
+                ),
+            ],
+            practice_task=make_practice(),
+        )
+
+
+def test_assessment_package_rejects_mismatched_task():
+    with pytest.raises(
+        ValidationError,
+        match="必须对应同一个路线任务",
+    ):
+        AssessmentPackage(
+            assessment_id="mismatched-task",
+            related_task_title="理解 checkpoint",
+            difficulty="beginner",
+            questions=[
+                make_question(
+                    "question-concept",
+                    "concept",
+                ),
+                make_question(
+                    "question-location",
+                    "code_location",
+                    related_task_title="另一个路线任务",
+                ),
+            ],
+            practice_task=make_practice(),
+        )
+
+
+def test_assessment_package_rejects_mismatched_difficulty():
+    with pytest.raises(
+        ValidationError,
+        match="难度必须与评估包一致",
+    ):
+        AssessmentPackage(
+            assessment_id="mismatched-difficulty",
+            related_task_title="理解 checkpoint",
+            difficulty="beginner",
+            questions=[
+                make_question(
+                    "question-concept",
+                    "concept",
+                ),
+                make_question(
+                    "question-location",
+                    "code_location",
+                    difficulty="advanced",
+                ),
+            ],
+            practice_task=make_practice(),
         )

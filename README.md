@@ -82,7 +82,7 @@ RepoMentor 后续将结合 openEuler 开源实习进行真实场景验证。
 
 ## 当前版本
 
-当前版本为 **V0.6 已完成 / V0.7 模型阶段**
+当前版本为 **V0.6 已完成 / V0.7 评估阶段**
 
 ## 当前已实现
 
@@ -159,8 +159,18 @@ RepoMentor 当前已经完成 V0.2 个性化路线原型、V0.4 真实仓库证�
 - 为 Checkpoint 的自定义模型反序列化配置精确 Msgpack 类型白名单；
 - 定义 `QuizQuestion`、`PracticeTask`、`EvaluationResult` 和
   `MasteryProfile`，为 V0.7 掌握度闭环建立严格数据边界；
+- 使用 `AssessmentPackage` 保证一次生成概念题、代码定位题和实践任务；
+- 新增证据约束的 `generate_assessment` 节点，
+  只使用当前路线任务引用且包含真实 `snippet` 的仓库证据；
+- 根据学习者当前水平确定 `beginner`、`intermediate` 或
+  `advanced` 评估难度；
+- 新增 `evaluate_answers` 节点，组合规则评分、模型评分和人工复核；
+- 代码定位题按完整路径、文件名和错误路径进行确定性评分；
+- 概念题使用受限结构化评分草稿，解析失败或越界分数会保守标记为
+  `uncertain`，不产生虚假高分；
+- 实践任务始终进入人工复核，不根据提交说明自动判定通过；
 - 自适应工作流和掌握度模型均有自动化测试，
-  当前完整测试集为 **78 passed**。
+  当前完整测试集为 **115 passed**。
 
 
 
@@ -452,7 +462,7 @@ Checkpoint 使用 `JsonPlusSerializer` 的精确类型白名单，
 - 修改学习者难度后重新分析和生成；
 - 使用相同 `thread_id` 从 checkpoint 恢复。
 
-## V0.7 掌握度模型
+## V0.7 掌握度评估
 
 V0.7 当前完成了掌握度闭环的数据模型基础：
 
@@ -466,6 +476,37 @@ V0.7 当前完成了掌握度闭环的数据模型基础：
 `MasteryProfile` 会校验知识点分数范围和评估项目唯一性。
 `AgentState.mastery` 已由临时 `dict` 占位升级为
 `MasteryProfile | None`。
+
+### 证据约束的评估生成
+
+`assessment_generator.py` 在调用 LLM 前先执行确定性筛选：
+
+- 只选择当前 `LearningTask` 已引用的文件；
+- 只接受 `RepositoryEvidence.snippet` 非空的内容证据；
+- 统一路径分隔符和大小写并去重；
+- 无真实内容证据时停止，不要求模型猜测源码；
+- 学习者水平无法识别时保守使用 `beginner` 难度。
+
+LLM 返回 `AssessmentPackage` 后，Python 再检查任务标题、难度、
+来源文件、原文 excerpt、代码定位答案和人工复核标记。
+
+### 混合答案评估
+
+`assessment_evaluator.py` 根据评估类型选择不同策略：
+
+```text
+concept       → 结构化 LLM 评分
+code_location → 仓库路径规则评分
+practice      → needs_human_review
+```
+
+概念题只允许 LLM 生成 `ConceptEvaluationDraft`，
+最终 `item_id`、评分方式、最高分、知识点和来源文件由 Python 重建。
+模型调用或解析失败、返回无效草稿、分数超过题目上限时，
+结果均为 `uncertain + score=None`。
+
+`generate_assessment` 和 `evaluate_answers` 已作为独立节点完成并测试，
+当前尚未接入 V0.6 主图；完整答案提交中断协议将在 V0.7 后续步骤设计。
 
 ## 当前限制
 
@@ -486,6 +527,7 @@ V0.7 当前完成了掌握度闭环的数据模型基础：
   不会扫描或批量读取整个仓库；
 - 当前 checkpoint 使用进程内存保存，服务重启后不能恢复旧会话；
 - 当前尚未提供交互式 UI，人工确认通过工作流入口提交；
+- V0.7 评估生成和答案评估节点当前可独立调用，尚未接入主图；
 - 当前不自动修改代码、不自动创建 PR。
 
 ## 当前演示效果
@@ -557,7 +599,7 @@ V0.6 ADAPTIVE WORKFLOW DEMO PASSED
 - 整合测试通过 monkeypatch 隔离 LLM 和文件读取依赖，
   保持离线、可重复执行。
 
-测试还覆盖了 V0.7 掌握度模型：
+测试还覆盖了 V0.7 掌握度评估：
 
 - 概念题、代码定位题和实践任务都能结构化保存；
 - 题目和实践任务必须记录路线任务、仓库来源和知识点；
@@ -565,7 +607,15 @@ V0.6 ADAPTIVE WORKFLOW DEMO PASSED
 - 已评分状态必须提供得分，待人工复核必须使用人工评分方式；
 - 知识点掌握度必须在 0 到 1 之间；
 - 同一评估项目不能重复计入掌握度画像；
-- 初始 `AgentState.mastery` 为 `None`，不伪造尚未产生的评估结果。
+- 初始 `AgentState.mastery` 为 `None`，不伪造尚未产生的评估结果；
+- 评估生成只接收与当前路线任务匹配的真实内容证据；
+- 未授权文件、虚构 excerpt 和错误难度会被拒绝；
+- Fake LLM 测试证明无关源码不会进入评估 Prompt；
+- 完整路径、仅文件名和错误路径分别获得明确的规则分数；
+- 概念题正常评分会记录已体现和缺失的具体关键点；
+- 空回答不调用 LLM，解析失败和越界分数不会得到高分；
+- 实践任务无论是否提交说明都进入人工复核；
+- `evaluate_answers` 能正确分发三类项目并拒绝未知题目 ID。
 
 运行全部测试：
 
@@ -586,9 +636,9 @@ python -m pytest tests/test_target_tool_calling.py -v
 项目将在已完成的输入澄清、有限证据循环和人工确认恢复上，
 按照以下顺序继续开发：
 
-1. 根据真实源码生成测验和实践任务；
-2. 记录学习结果并评估掌握度；
-3. 根据薄弱点重新规划后续任务；
+1. 根据评估结果更新学习者掌握度画像；
+2. 根据薄弱点重新规划后续任务；
+3. 将评估生成、答案提交和结果更新接入主图；
 4. 增加开源贡献准备度评估；
 5. 增加代码库 RAG 问答；
 6. 将内存 checkpoint 升级为持久化存储；
@@ -642,6 +692,8 @@ repo-mentor/
 │       ├── workflow_state.py
 │       ├── adaptive_nodes.py
 │       ├── adaptive_workflow.py
+│       ├── assessment_generator.py
+│       ├── assessment_evaluator.py
 │       ├── checkpoint_interrupt_demo.py
 │       └── demo_adaptive_flow.py
 ├── tests/
@@ -651,6 +703,8 @@ repo-mentor/
 │   ├── test_target_tool_calling.py
 │   ├── test_workflow_state.py
 │   ├── test_adaptive_nodes.py
+│   ├── test_assessment_generator.py
+│   ├── test_assessment_evaluator.py
 │   ├── test_assessment_models.py
 │   ├── test_roadmap_confirmation.py
 │   └── test_adaptive_workflow.py

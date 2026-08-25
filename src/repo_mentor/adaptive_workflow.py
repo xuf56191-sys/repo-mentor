@@ -34,6 +34,8 @@ CHECKPOINT_ALLOWED_MSGPACK_MODULES = [
     ("repo_mentor.models", "RepositoryEvidence"),
     ("repo_mentor.models", "LearningRoadmap"),
     ("repo_mentor.models", "RoadmapConfirmation"),
+    ("repo_mentor.models", "AssessmentPackage"),
+    ("repo_mentor.models", "EvaluationResult"),
     ("repo_mentor.models", "MasteryProfile"),
     (
         "repo_mentor.repository_safeguards",

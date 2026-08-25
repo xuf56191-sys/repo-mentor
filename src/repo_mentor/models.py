@@ -330,6 +330,13 @@ class PracticeTask(StrictModel):
         min_length=1,
         description="可验证的完成条件",
     )
+    max_score: int = Field(
+        default=10,
+        ge=1,
+        le=100,
+        description="实践任务最高分",
+    )
+
     estimated_hours: float = Field(
         ge=0.25,
         le=12,
@@ -339,6 +346,135 @@ class PracticeTask(StrictModel):
         default=True,
         description="实践产物是否需要人工检查",
     )
+
+class AssessmentPackage(StrictModel):
+    """围绕一个路线任务生成的完整评估包。"""
+
+    assessment_id: str = Field(
+        min_length=1,
+        description="本次评估包的唯一标识",
+    )
+    related_task_title: str = Field(
+        min_length=2,
+        description="评估包对应的当前路线任务",
+    )
+    difficulty: AssessmentDifficulty = Field(
+        description="整组评估的统一难度",
+    )
+    questions: list[QuizQuestion] = Field(
+        min_length=2,
+        max_length=2,
+        description="一题概念题和一题代码定位题",
+    )
+    practice_task: PracticeTask = Field(
+        description="一个基于真实仓库证据的实践任务",
+    )
+
+    @model_validator(mode="after")
+    def validate_assessment_package(
+        self,
+    ) -> "AssessmentPackage":
+        """校验题型、任务、难度和标识的一致性。"""
+        question_types = {
+            question.question_type
+            for question in self.questions
+        }
+
+        if question_types != {
+            "concept",
+            "code_location",
+        }:
+            raise ValueError(
+                "评估包必须同时包含一题概念题和一题代码定位题"
+            )
+
+        all_items = [
+            *self.questions,
+            self.practice_task,
+        ]
+
+        if any(
+            item.related_task_title
+            != self.related_task_title
+            for item in all_items
+        ):
+            raise ValueError(
+                "所有评估项目必须对应同一个路线任务"
+            )
+
+        if any(
+            item.difficulty != self.difficulty
+            for item in all_items
+        ):
+            raise ValueError(
+                "所有评估项目的难度必须与评估包一致"
+            )
+
+        item_ids = [
+            question.question_id
+            for question in self.questions
+        ]
+        item_ids.append(
+            self.practice_task.practice_id
+        )
+
+        if len(item_ids) != len(set(item_ids)):
+            raise ValueError(
+                "评估项目标识不能重复"
+            )
+
+        return self
+
+class ConceptEvaluationDraft(StrictModel):
+    """LLM 对概念题回答产生的受限评分草稿。"""
+
+    status: Literal[
+        "evaluated",
+        "uncertain",
+    ] = Field(
+        description="可以可靠评分，或当前证据不足以评分",
+    )
+    score: float | None = Field(
+        default=None,
+        ge=0,
+        le=100,
+        description="建议得分；不确定时必须为空",
+    )
+    feedback: str = Field(
+        min_length=5,
+        description="基于参考答案和证据的具体评分理由",
+    )
+    matched_points: list[str] = Field(
+        default_factory=list,
+        description="回答已经体现的关键点",
+    )
+    missing_points: list[str] = Field(
+        default_factory=list,
+        description="回答缺少或错误的关键点",
+    )
+
+    @model_validator(mode="after")
+    def validate_concept_evaluation(
+        self,
+    ) -> "ConceptEvaluationDraft":
+        """不允许在不确定状态下给出看似精确的分数。"""
+        if (
+            self.status == "evaluated"
+            and self.score is None
+        ):
+            raise ValueError(
+                "可以评分时必须提供建议得分"
+            )
+
+        if (
+            self.status == "uncertain"
+            and self.score is not None
+        ):
+            raise ValueError(
+                "评分不确定时不能提供建议得分"
+            )
+
+        return self
 
 class EvaluationResult(StrictModel):
     """一道测验题或实践任务的结构化评估结果。"""

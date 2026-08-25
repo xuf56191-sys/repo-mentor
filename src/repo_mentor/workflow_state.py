@@ -16,9 +16,13 @@ from repo_mentor.repository_safeguards import (
     EvidenceBudget,
     SENSITIVE_KEYWORDS,
 )
+
 from repo_mentor.models import (
+    AssessmentPackage,
+    EvaluationResult,
     LearnerProfile,
     LearningRoadmap,
+    MasteryProfile,
     RepositoryEvidence,
     RoadmapConfirmation,
     TargetTask,
@@ -55,6 +59,17 @@ class AgentState(TypedDict, total=False):
 
     # 产生：evaluate_answers/update_profile；消费：replan
     mastery: MasteryProfile | None
+    # ---------- 评估 ----------
+    # 产生：generate_assessment；消费：evaluate_answers
+    assessment: AssessmentPackage | None
+
+    # 产生：用户/调用方；消费：evaluate_answers
+    # key 是 question_id 或 practice_id，value 是答案或提交说明
+    learner_answers: dict[str, str]
+
+    # 产生：evaluate_answers；消费：update_profile
+    evaluation_results: list[EvaluationResult]
+
 
     # ---------- 运行时 ----------
     messages: Annotated[list, add_messages]  # 产生/消费: 所有节点, LLM 对话历史
@@ -109,6 +124,10 @@ def create_initial_state(
         "confirmation_status": "not_requested",
         "human_confirmation": None,
         "revision_count": 0,
+        "assessment": None,  #尚未生成测验；
+        "learner_answers": {},   #用户尚未回答；
+        "evaluation_results": [],   #尚无评分结果；
+        "mastery": None,   #尚无足够结果形成画像。
     }
 
 

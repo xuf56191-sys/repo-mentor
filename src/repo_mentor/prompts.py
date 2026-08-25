@@ -227,8 +227,120 @@ FINAL_ROADMAP_PROMPT = ChatPromptTemplate.from_messages(
     ]
 )
 
+ASSESSMENT_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            """
+你是 RepoMentor 的学习评估生成器。
+
+你只能根据输入中的当前路线任务、学习者画像和真实仓库证据片段出题。
+不得使用外部知识补充仓库实现，不得编造文件、函数、类或行为。
+
+必须生成一个 AssessmentPackage，包含：
+
+1. 一道 concept 概念题；
+2. 一道 code_location 代码定位题；
+3. 一个需要提交小型修改或测试的 PracticeTask。
+
+必须遵守：
+
+1. related_task_title 必须与输入路线任务标题完全一致；
+2. 所有项目 difficulty 必须与指定难度完全一致；
+3. evidence_sources 只能使用输入中出现的 source_path；
+4. 每道题和实践任务至少记录一个知识点；
+5. expected_answer 必须能够从证据片段直接支持；
+6. code_location 的参考答案必须包含真实文件路径；
+7. 不得询问证据片段中没有出现的类、函数或实现细节；
+8. excerpt 如果填写，必须原样摘自输入证据，不能改写或编造；
+9. PracticeTask 必须是小范围、可验收的任务；
+10. PracticeTask.requires_human_review 必须为 true；
+11. 初学者题目侧重识别和解释，不要求复杂架构设计；
+12. 中级题目可以要求比较流程、解释边界或补充测试；
+13. 高级题目可以要求分析设计权衡，但仍不能超出证据。
+""".strip(),
+        ),
+        (
+            "human",
+            """
+请根据以下信息生成结构化评估包。
+
+【学习者画像】
+{learner_profile}
+
+【当前路线任务】
+{learning_task}
+
+【指定难度】
+{difficulty}
+
+【允许使用的真实仓库内容证据】
+{evidence}
+
+生成前请确认：
+
+- 只使用上面提供的文件路径；
+- 所有问题都能由上面的证据片段支持；
+- 不要询问未提供源码内容的文件；
+- 概念题、定位题和实践任务必须围绕同一个路线任务。
+""".strip(),
+        ),
+    ]
+)
+
 ROADMAP_PROMPTS = {
     "v1_baseline": PROMPT_V1,
     "v2_constrained": PROMPT_V2,
     "v3_evidence_based": PROMPT_V3,
 }
+
+CONCEPT_EVALUATION_PROMPT = (
+    ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                """
+你是 RepoMentor 的概念题评估器。
+
+你只能根据题目、参考答案、真实仓库来源和学习者回答评分。
+不得因为回答语言流畅就给高分，必须检查关键概念是否正确。
+
+必须遵守：
+
+1. 建议得分范围为 0 到 max_score；
+2. feedback 必须指出回答正确了什么、缺少什么或错在哪里；
+3. matched_points 只记录回答实际体现的关键点；
+4. missing_points 记录缺失或错误的关键点；
+5. 如果参考答案、证据或学习者回答不足以可靠评分，
+   status 必须为 uncertain，score 必须为空；
+6. 不得使用输入之外的仓库知识补充评分理由；
+7. 不要求与参考答案逐字一致，只比较语义关键点。
+""".strip(),
+            ),
+            (
+                "human",
+                """
+【题目】
+{question}
+
+【学习者回答】
+{learner_answer}
+
+【参考答案】
+{expected_answer}
+
+【最高分】
+{max_score}
+
+【知识点】
+{knowledge_points}
+
+【真实仓库来源】
+{evidence_sources}
+
+请输出 ConceptEvaluationDraft。
+""".strip(),
+            ),
+        ]
+    )
+)

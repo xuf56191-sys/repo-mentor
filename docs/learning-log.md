@@ -2633,3 +2633,282 @@ Mermaid、代码、README 和演示表达同一 10 节点工作流，
 * 实现 `generate_assessment` 节点；
 * 保证题目难度与学习者基础匹配；
 * 为参考答案保留可审查的仓库来源。
+
+---
+
+## 2026-08-22：生成目标相关测验
+
+### 今天的目标
+
+学习如何利用当前学习任务、真实仓库证据片段和学习者基础，
+生成难度合适、来源可追溯的概念题、代码定位题和实践任务，
+并避免询问仓库中不存在或尚未读取的内容。
+
+### 今天完成
+
+* 新增 `AssessmentPackage`，一次封装一题概念题、一题代码定位题
+  和一个实践任务；
+* 校验三个项目的路线任务、难度和 ID 一致性；
+* 为 `AgentState` 增加 `assessment`、`learner_answers` 和
+  `evaluation_results`；
+* 为新状态字段设置不共享的空字典和空列表默认值；
+* 新增 `assessment_generator.py`；
+* 实现路径标准化和学习者难度推断；
+* 实现只选择任务相关内容证据的证据防火墙；
+* 新增 `ASSESSMENT_PROMPT`，约束 LLM 只使用允许的路径和片段；
+* 实现 `generate_structured_assessment()` 结构化 LLM 调用；
+* 对 LLM 结果执行任务、难度、路径、excerpt 和定位答案后置校验；
+* 新增 `generate_assessment` LangGraph 节点；
+* 人工修改目标或难度时同步清理旧测验、答案和评估结果；
+* 使用 Fake LLM 验证生成流程，不联网、不产生模型费用；
+* 当日完成后全量测试达到 100 个，全部通过。
+
+### 1. 测验生成是受约束转换
+
+测验生成不是把整个仓库目录交给模型自由出题，
+而是一个有输入和输出防火墙的转换过程：
+
+```text
+LearnerProfile
++ 当前 LearningTask
++ 与任务文件匹配的 RepositoryEvidence.snippet
+                ↓
+        结构化 LLM 生成
+                ↓
+任务、难度、路径、excerpt、定位答案后置校验
+                ↓
+        AssessmentPackage
+```
+
+确定性代码负责选择“模型允许看到什么”，
+LLM 只负责在已批准上下文内组织题目和参考答案。
+
+### 2. 路径证据不等于内容证据
+
+`LearningTask.evidence_sources` 说明路线建议关注哪些文件，
+但不能单独证明文件内部存在某个函数或行为。
+只有仓库工具实际读取并写入 `RepositoryEvidence.snippet` 的内容，
+才允许用于询问内部实现。
+
+`select_assessment_evidence()` 同时要求：
+
+* 文件路径被当前学习任务引用；
+* `snippet` 去除空白后非空；
+* 路径标准化后没有重复。
+
+没有合格内容证据时明确抛出错误，不把不确定信息交给模型猜测。
+
+### 3. 难度由规则确定
+
+`infer_assessment_difficulty()` 从 `LearnerProfile.current_level`
+映射 `beginner`、`intermediate` 和 `advanced`。
+无法识别的描述保守回退到 `beginner`，
+避免模型因为自由理解用户水平而生成过难题目。
+
+难度既写入 Prompt，又在 LLM 返回后与 `AssessmentPackage.difficulty`
+比较。Prompt 是指导，Python 后置校验才是强制边界。
+
+### 4. AssessmentPackage 的集合级约束
+
+单个 `QuizQuestion` 或 `PracticeTask` 合法，
+不代表三者组合后仍然满足业务要求。
+`AssessmentPackage` 进一步保证：
+
+* 恰好两道问题；
+* 同时包含 `concept` 和 `code_location`；
+* 只有一个实践任务；
+* 三项内容对应同一路线任务；
+* 三项内容使用统一难度；
+* 题目和实践 ID 不重复。
+
+这个顶层容器也是 `with_structured_output()` 的正式输出 Schema。
+
+### 5. 生成后的真实性校验
+
+Pydantic 能证明返回值结构正确，但不能证明路径和 excerpt 真实。
+`validate_assessment_against_context()` 使用实际输入证据再次检查：
+
+* 评估包必须对应本次路线任务；
+* 难度必须匹配本次学习者；
+* 所有来源路径必须在允许集合内；
+* excerpt 必须原样存在于真实 snippet；
+* 实践任务必须进入人工复核；
+* 代码定位题参考答案必须包含真实来源路径。
+
+### 6. 节点职责
+
+`generate_assessment` 节点只负责：
+
+1. 确认已经存在 `LearningRoadmap`；
+2. 选择当前版本的首个学习任务；
+3. 把学习者、任务和证据交给生成器；
+4. 返回 `{"assessment": assessment}`。
+
+节点没有复制 Prompt、证据筛选或结果校验逻辑，
+因此生成器可以独立测试和复用。
+
+### 测试与验收
+
+新增测试覆盖：
+
+* 三种学习者水平和未知水平回退；
+* Windows/Unix 路径统一；
+* 忽略路径证据、无关文件和重复文件；
+* 没有内容证据时停止；
+* 评估包题型、任务和难度组合；
+* Fake LLM 只收到筛选后的片段；
+* 未授权文件、虚构 excerpt 和错误难度被拒绝；
+* 实践任务必须人工复核；
+* 节点选择路线首个任务；
+* 修改目标后旧评估状态全部失效。
+
+8 月 22 日验收标准全部通过：题目不依赖仓库外内容，
+难度与学习者匹配，参考答案和所有项目均保留真实来源。
+
+### 核心认识
+
+减少测验幻觉不能只依赖一句“不得编造”的 Prompt。
+可靠方案是输入最小化、结构化输出、上下文后置校验和离线边界测试共同工作。
+
+---
+
+## 2026-08-23：回答评估器
+
+### 今天的目标
+
+学习规则评分、模型评分和人工复核各自适合什么任务，
+实现 `evaluate_answers`，让评分理由具体，
+并在模型不确定或输出异常时避免产生虚假高分。
+
+### 今天完成
+
+* 为 `PracticeTask` 增加 `max_score`；
+* 新增 `assessment_evaluator.py`；
+* 实现代码定位题的完整路径、文件名和错误路径规则评分；
+* 实现实践任务人工复核结果；
+* 新增 `ConceptEvaluationDraft` 受限模型评分草稿；
+* 新增 `CONCEPT_EVALUATION_PROMPT`；
+* 实现概念题结构化 LLM 评分；
+* 模型调用失败、解析失败、无效草稿和越界分数均降级为
+  `uncertain + score=None`；
+* 空概念题回答不调用 LLM，直接规则评分为零；
+* 评分反馈组合已体现和仍缺少的关键点；
+* 新增 `evaluate_answers` 节点，按项目类型分发三种评估方式；
+* 未知题目 ID 和非字符串答案会在节点边界被拒绝；
+* 完整测试集达到 115 个，全部通过。
+
+### 1. 不同任务需要不同评估方式
+
+```text
+code_location → rule
+concept       → model
+practice      → human
+```
+
+代码定位题的目标是判断是否找到了允许的仓库路径，
+规则比模型更稳定、便宜且可解释。
+概念题允许不同措辞表达相同语义，需要模型比较关键点。
+实践任务涉及真实代码、测试质量和完成标准，
+仅凭一段“已经完成”的提交说明不能自动通过，因此进入人工复核。
+
+### 2. 代码定位题规则评分
+
+当前规则明确且可测试：
+
+* 包含完整允许路径：获得满分；
+* 只包含正确文件名：获得 60% 分数；
+* 没有允许路径或文件名：零分。
+
+反馈会写出匹配到的路径，或者列出应该定位的来源文件，
+不会只返回“错误”或“部分正确”。
+
+### 3. 为什么不让 LLM 直接返回 EvaluationResult
+
+`item_id`、`evaluation_method`、`max_score`、`knowledge_points`
+和 `source_files` 都来自题目本身，是系统权威字段，
+不应交给模型重新填写。
+
+LLM 只生成 `ConceptEvaluationDraft`：
+
+* `status`；
+* 建议 `score`；
+* `feedback`；
+* `matched_points`；
+* `missing_points`。
+
+Python 再使用原问题字段重建最终 `EvaluationResult`。
+这避免模型篡改题目身份、最高分或来源。
+
+### 4. 不确定不是低置信度高分
+
+`ConceptEvaluationDraft` 强制：
+
+```text
+evaluated → score 必须存在
+uncertain → score 必须为 None
+```
+
+模型调用失败、结构化解析失败、返回错误类型或得分超过题目上限时，
+评估器都返回 `uncertain + score=None`。
+下游不能把一个看似精确的高分误认为可靠掌握证据。
+
+空回答是确定事实，不需要消耗 LLM 调用，直接获得零分。
+
+### 5. 实践任务保持人工边界
+
+无论学习者是否提交了文字说明，实践结果都使用：
+
+```text
+status = needs_human_review
+evaluation_method = human
+score = None
+```
+
+反馈会列出 `completion_criteria`，帮助人工检查真实产物，
+而不是根据“我已经写完测试”自动给分。
+
+### 6. evaluate_answers 节点
+
+节点恢复并校验 `AssessmentPackage`，读取
+`learner_answers[item_id]`，再按题型分发。
+缺失答案使用空字符串交给评估器保守处理；
+未知 ID 则直接报错，避免把旧测验或拼错 ID 的答案静默忽略。
+
+结果顺序保持为两道问题加一个实践任务，统一写入
+`evaluation_results`，供下一步掌握度画像更新使用。
+
+### 测试与验收
+
+新增测试证明：
+
+* 完整路径、文件名和错误路径得到预期规则分数；
+* 规则定位评估器拒绝概念题；
+* 实践任务始终人工复核；
+* 正常概念评分包含已体现和缺失的具体理由；
+* 空回答跳过 LLM 并得到零分；
+* 不确定草稿、解析失败和越界分数没有得分；
+* `evaluate_answers` 将三类项目分发给正确评估器；
+* 未知 ID 被拒绝；
+* 缺失答案按空回答处理。
+
+最终全量结果：
+
+```text
+115 passed in 3.46s
+```
+
+8 月 23 日验收标准全部通过。
+
+### 当前边界
+
+`generate_assessment` 和 `evaluate_answers` 已作为独立节点实现，
+但尚未接入 V0.6 主图。原因是答案提交需要新的 interrupt/resume 协议，
+而后续还需要 `update_profile` 和 mastery-driven replan。
+当前先保证每个组件独立正确，再组装完整 V0.7 闭环。
+
+### 下一步
+
+* 根据 `evaluation_results` 更新 `MasteryProfile`；
+* 区分用户自述技能和实际评估证据；
+* 让薄弱点可追溯到具体题目和源码；
+* 再根据掌握度阈值进行自适应重新规划。
