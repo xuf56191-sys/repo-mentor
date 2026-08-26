@@ -28,6 +28,12 @@ TaskType = Literal[
     "other",
 ]
 
+KnowledgeMasteryStatus = Literal[
+    "mastered",
+    "developing",
+    "weak",
+]
+
 EvidenceType = Literal[
     "readme",
     "directory",
@@ -58,6 +64,13 @@ EvaluationMethod = Literal[
     "rule",
     "model",
     "human",
+]
+
+ReplanAction = Literal[
+    "advance",
+    "add_practice",
+    "add_review",
+    "stop",
 ]
 
 EvaluationStatus = Literal[
@@ -546,6 +559,30 @@ class EvaluationResult(StrictModel):
 
         return self
 
+class KnowledgeMasteryEvidence(StrictModel):
+    """一个知识点的掌握结论及其评估来源。"""
+
+    knowledge_point: str = Field(
+        min_length=1,
+        description="被评估的知识点",
+    )
+    score: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="该知识点的归一化掌握度",
+    )
+    status: KnowledgeMasteryStatus = Field(
+        description="已掌握、发展中或薄弱",
+    )
+    assessment_item_ids: list[str] = Field(
+        min_length=1,
+        description="支持该结论的题目或任务 ID",
+    )
+    source_files: list[str] = Field(
+        min_length=1,
+        description="支持该结论的真实仓库文件",
+    )
+
 class MasteryProfile(StrictModel):
     """围绕当前目标任务形成的学习者掌握度汇总。"""
 
@@ -578,6 +615,26 @@ class MasteryProfile(StrictModel):
         default_factory=list,
         description="构成本次掌握度画像的评估结果",
     )
+    mastered_skills: list[str] = Field(
+        default_factory=list,
+        description="由实际评估证据确认掌握的知识点",
+    )
+    completed_tasks: list[str] = Field(
+        default_factory=list,
+        description="已经可靠评分完成的题目或任务 ID",
+    )
+    confidence: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="当前画像的证据覆盖度",
+    )
+    knowledge_evidence: list[
+        KnowledgeMasteryEvidence
+    ] = Field(
+        default_factory=list,
+        description="各知识点结论与题目、源码的对应关系",
+    )
 
     @model_validator(mode="after")
     def validate_mastery_profile(
@@ -603,6 +660,57 @@ class MasteryProfile(StrictModel):
         if len(item_ids) != len(set(item_ids)):
             raise ValueError(
                 "同一个评估项目不能重复计入掌握度画像"
+            )
+
+        return self
+
+class ReplanDecision(StrictModel):
+    """掌握度 Reflection 产生的确定性重新规划决定。"""
+
+    action: ReplanAction = Field(
+        description="进入下一模块、增加实践、增加复习或停止",
+    )
+    overall_score: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="作出决定时使用的总体掌握度",
+    )
+    reason: str = Field(
+        min_length=5,
+        description="为什么选择该重新规划动作",
+    )
+    focus_points: list[str] = Field(
+        default_factory=list,
+        description="新增任务必须对应的薄弱或发展中知识点",
+    )
+    replan_count: int = Field(
+        ge=0,
+        description="作出决定前已经重新规划的次数",
+    )
+    max_replans: int = Field(
+        ge=1,
+        description="最多允许重新规划的次数",
+    )
+
+    @model_validator(mode="after")
+    def validate_replan_decision(
+        self,
+    ) -> "ReplanDecision":
+        """新增任务时必须说明针对哪些知识点。"""
+        if (
+            self.action in {
+                "add_practice",
+                "add_review",
+            }
+            and not self.focus_points
+        ):
+            raise ValueError(
+                "新增实践或复习任务时必须提供 focus_points"
+            )
+
+        if self.replan_count > self.max_replans:
+            raise ValueError(
+                "replan_count 不能超过 max_replans"
             )
 
         return self

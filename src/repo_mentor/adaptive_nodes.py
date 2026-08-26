@@ -11,6 +11,9 @@
 - confirm_roadmap       ：暂停图并等待用户确认路线
 - generate_assessment   ：调用 LLM 生成证据约束的评估包
 - evaluate_answers      ：组合规则、模型和人工复核结果
+- update_profile        ：根据实际评估证据更新掌握度画像
+- reflect_on_mastery    ：根据掌握度和次数上限作出重规划决定
+- apply_mastery_replan  ：把补练或复习决定转换为可追溯任务
 
 节点间接力：
 generate_roadmap 产出路线
@@ -28,6 +31,10 @@ from repo_mentor.models import (
     TargetTask,
     RoadmapConfirmation,
     AssessmentPackage,
+    EvaluationResult,
+    LearningTask,
+    MasteryProfile,
+    ReplanDecision,
 )
 from repo_mentor.repository_ranker import (
     extract_target_keywords,  # 从目标任务提取文件路径关键词
@@ -48,6 +55,13 @@ from repo_mentor.assessment_evaluator import (
     evaluate_code_location_answer,
     evaluate_concept_answer,
     mark_practice_for_human_review,
+)
+from repo_mentor.mastery_updater import (
+    build_mastery_profile,
+)
+from repo_mentor.mastery_replanner import (
+    build_supplemental_task,
+    decide_replan,
 )
 
 # ---------------- 节点 1：检查原始请求信息（纯规则，无 LLM） ----------------
@@ -738,4 +752,141 @@ def evaluate_answers(
 
     return {
         "evaluation_results": results,
+    }
+
+
+# ---------------- 节点 13：更新证据驱动的掌握度画像 ----------------
+
+def update_profile(
+    state: AgentState,
+) -> dict:
+    """根据可靠评估结果构建 MasteryProfile。"""
+    raw_results = state.get(
+        "evaluation_results",
+        [],
+    )
+
+    if not raw_results:
+        raise ValueError(
+            "更新学习者画像前必须存在评估结果"
+        )
+
+    target_task = state.get("target_task")
+
+    if target_task is None:
+        raise ValueError(
+            "更新学习者画像前必须存在 TargetTask"
+        )
+
+    # Checkpoint 恢复或外部调用后，列表元素可能是 dict。
+    # 在节点边界重新恢复成严格模型。
+    evaluation_results = [
+        EvaluationResult.model_validate(result)
+        for result in raw_results
+    ]
+
+    mastery = build_mastery_profile(
+        target_task=target_task,
+        evaluation_results=evaluation_results,
+        profile_id=(
+            "mastery-revision-"
+            f"{state.get('revision_count', 0)}"
+        ),
+    )
+
+    return {
+        "mastery": mastery,
+    }
+
+
+# ---------------- 节点 14：反思掌握度并决定下一步 ----------------
+
+def reflect_on_mastery(
+    state: AgentState,
+) -> dict:
+    """根据掌握度分段和次数上限生成重规划决定。"""
+    raw_mastery = state.get("mastery")
+
+    if raw_mastery is None:
+        raise ValueError(
+            "反思掌握度前必须存在 MasteryProfile"
+        )
+
+    # Checkpoint 恢复后可能是 dict，
+    # 在节点边界恢复为严格模型。
+    mastery = MasteryProfile.model_validate(
+        raw_mastery
+    )
+    replan_count = state.get("replan_count", 0)
+    max_replans = state.get("max_replans", 1)
+
+    decision = decide_replan(
+        mastery,
+        replan_count=replan_count,
+        max_replans=max_replans,
+    )
+
+    return {
+        "replan_decision": decision,
+    }
+
+
+# ---------------- 节点 15：应用有界的自适应重规划 ----------------
+
+def apply_mastery_replan(
+    state: AgentState,
+) -> dict:
+    """为补练或复习决定追加一项可追溯任务。"""
+    raw_mastery = state.get("mastery")
+    raw_decision = state.get("replan_decision")
+
+    if raw_mastery is None:
+        raise ValueError(
+            "应用重规划前必须存在 MasteryProfile"
+        )
+
+    if raw_decision is None:
+        raise ValueError(
+            "应用重规划前必须存在 ReplanDecision"
+        )
+
+    mastery = MasteryProfile.model_validate(
+        raw_mastery
+    )
+    decision = ReplanDecision.model_validate(
+        raw_decision
+    )
+
+    if decision.action not in {
+        "add_practice",
+        "add_review",
+    }:
+        raise ValueError(
+            "apply_mastery_replan 只能处理"
+            " add_practice 或 add_review"
+        )
+
+    current_count = state.get("replan_count", 0)
+    max_replans = state.get("max_replans", 1)
+
+    if current_count >= max_replans:
+        raise ValueError(
+            "已达到重规划次数上限，不能再追加任务"
+        )
+
+    task = build_supplemental_task(
+        mastery,
+        decision,
+    )
+    existing_tasks = [
+        LearningTask.model_validate(item)
+        for item in state.get("supplemental_tasks", [])
+    ]
+
+    return {
+        "supplemental_tasks": [
+            *existing_tasks,
+            task,
+        ],
+        "replan_count": current_count + 1,
     }

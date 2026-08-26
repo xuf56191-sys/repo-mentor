@@ -21,6 +21,10 @@ from repo_mentor.models import (
     AssessmentPackage,
     PracticeTask,
     QuizQuestion,
+    EvaluationResult,
+    KnowledgeMasteryEvidence,
+    MasteryProfile,
+    ReplanDecision,
 )
 from repo_mentor.adaptive_nodes import (
     analyze_learner,
@@ -35,6 +39,9 @@ from repo_mentor.adaptive_nodes import (
     apply_human_revision,
     generate_assessment,
     evaluate_answers,
+    update_profile,
+    reflect_on_mastery,
+    apply_mastery_replan,
 )
 import pytest
 
@@ -58,6 +65,59 @@ def make_target() -> TargetTask:
         task_type="understand_module",
         expected_outcome="能说明目录树生成流程",
     )
+
+
+def make_profile_evaluation_result() -> EvaluationResult:
+    """构造 update_profile 节点使用的可靠结果。"""
+    return EvaluationResult(
+        item_id="question-checkpoint",
+        item_type="quiz_question",
+        learner_response="thread_id 用于定位 checkpoint",
+        status="evaluated",
+        evaluation_method="rule",
+        score=8,
+        max_score=10,
+        feedback="能够说明 checkpoint 定位作用",
+        knowledge_points=["checkpoint", "thread_id"],
+        source_files=[
+            "src/repo_mentor/adaptive_workflow.py",
+        ],
+    )
+
+
+def make_replan_mastery(
+    score: float = 0.70,
+    status: str = "developing",
+) -> MasteryProfile:
+    """构造 Reflection 节点使用的可追溯掌握度。"""
+    evidence = KnowledgeMasteryEvidence(
+        knowledge_point="条件路由",
+        score=score,
+        status=status,
+        assessment_item_ids=["question-routing"],
+        source_files=[
+            "src/repo_mentor/adaptive_workflow.py",
+        ],
+    )
+
+    return MasteryProfile(
+        profile_id="mastery-node-test",
+        target_task_title="理解自适应工作流",
+        overall_score=score,
+        knowledge_scores={"条件路由": score},
+        weak_points=(
+            ["条件路由"]
+            if status == "weak"
+            else []
+        ),
+        mastered_skills=(
+            ["条件路由"]
+            if status == "mastered"
+            else []
+        ),
+        knowledge_evidence=[evidence],
+    )
+
 
 def make_learning_roadmap() -> LearningRoadmap:
     """构造包含两个任务的路线，用于验证节点选择首个任务。"""
@@ -921,3 +981,178 @@ def test_evaluate_answers_treats_missing_answers_as_empty(
         ("location", ""),
         ("practice", ""),
     ]
+
+def test_update_profile_restores_results_and_calls_updater(
+    monkeypatch,
+):
+    """节点应恢复 dict 结果并只写回 mastery。"""
+    from repo_mentor import adaptive_nodes
+
+    learner = make_learner()
+    target = make_target()
+    raw_result = (
+        make_profile_evaluation_result()
+        .model_dump(mode="json")
+    )
+    fake_mastery = object()
+    captured = {}
+
+    def fake_builder(
+        *,
+        target_task,
+        evaluation_results,
+        profile_id,
+    ):
+        captured["target_task"] = target_task
+        captured["results"] = evaluation_results
+        captured["profile_id"] = profile_id
+        return fake_mastery
+
+    monkeypatch.setattr(
+        adaptive_nodes,
+        "build_mastery_profile",
+        fake_builder,
+    )
+
+    update = update_profile({
+        "learner_profile": learner,
+        "target_task": target,
+        "evaluation_results": [raw_result],
+        "revision_count": 2,
+    })
+
+    assert update == {
+        "mastery": fake_mastery,
+    }
+    assert captured["target_task"] == target
+    assert isinstance(
+        captured["results"][0],
+        EvaluationResult,
+    )
+    assert captured["results"][0].score == 8
+    assert captured["profile_id"] == (
+        "mastery-revision-2"
+    )
+
+    # 节点没有返回 learner_profile，
+    # 因而不会覆盖用户最初自述的画像。
+    assert "learner_profile" not in update
+
+
+def test_update_profile_requires_results():
+    with pytest.raises(
+        ValueError,
+        match="必须存在评估结果",
+    ):
+        update_profile({
+            "target_task": make_target(),
+            "evaluation_results": [],
+        })
+
+
+def test_update_profile_requires_target():
+    with pytest.raises(
+        ValueError,
+        match="必须存在 TargetTask",
+    ):
+        update_profile({
+            "evaluation_results": [
+                make_profile_evaluation_result(),
+            ],
+        })
+
+
+def test_reflect_on_mastery_restores_model_and_decides():
+    """Reflection 节点应恢复 dict，但不提前增加次数。"""
+    mastery = make_replan_mastery()
+
+    result = reflect_on_mastery({
+        "mastery": mastery.model_dump(mode="json"),
+        "replan_count": 0,
+        "max_replans": 1,
+    })
+
+    assert result["replan_decision"].action == (
+        "add_practice"
+    )
+    assert "replan_count" not in result
+
+
+def test_reflect_on_mastery_stops_at_replan_limit():
+    """已达上限时 Reflection 应停止，不再生成任务。"""
+    result = reflect_on_mastery({
+        "mastery": make_replan_mastery(),
+        "replan_count": 1,
+        "max_replans": 1,
+    })
+
+    assert result["replan_decision"].action == "stop"
+
+
+def test_apply_mastery_replan_appends_once():
+    """应用节点应保留旧任务，追加一项并增加次数。"""
+    mastery = make_replan_mastery()
+    decision = reflect_on_mastery({
+        "mastery": mastery,
+        "replan_count": 0,
+        "max_replans": 1,
+    })["replan_decision"]
+    existing_task = make_learning_roadmap(
+    ).daily_plans[0].tasks[0]
+
+    result = apply_mastery_replan({
+        "mastery": mastery.model_dump(mode="json"),
+        "replan_decision": decision.model_dump(
+            mode="json"
+        ),
+        "supplemental_tasks": [
+            existing_task.model_dump(mode="json"),
+        ],
+        "replan_count": 0,
+        "max_replans": 1,
+    })
+
+    assert result["replan_count"] == 1
+    assert len(result["supplemental_tasks"]) == 2
+    assert result["supplemental_tasks"][0] == (
+        existing_task
+    )
+    assert result["supplemental_tasks"][1].title == (
+        "补充实践：条件路由"
+    )
+
+
+def test_apply_mastery_replan_rejects_advance():
+    """前进决定不能被应用节点转换为补充任务。"""
+    mastery = make_replan_mastery(
+        score=0.80,
+        status="mastered",
+    )
+    decision = ReplanDecision(
+        action="advance",
+        overall_score=0.80,
+        reason="掌握度达标，可以进入下一模块。",
+        focus_points=[],
+        replan_count=0,
+        max_replans=1,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="只能处理",
+    ):
+        apply_mastery_replan({
+            "mastery": mastery,
+            "replan_decision": decision,
+            "replan_count": 0,
+            "max_replans": 1,
+        })
+
+
+def test_reflect_on_mastery_requires_profile():
+    """Reflection 节点没有掌握度时必须明确拒绝。"""
+    with pytest.raises(
+        ValueError,
+        match="必须存在 MasteryProfile",
+    ):
+        reflect_on_mastery({})

@@ -2912,3 +2912,305 @@ score = None
 * 区分用户自述技能和实际评估证据；
 * 让薄弱点可追溯到具体题目和源码；
 * 再根据掌握度阈值进行自适应重新规划。
+
+---
+
+## 2026-08-24：更新学习者画像
+
+### 今天的目标
+
+理解“用户自述能力”和“评估证据证明的掌握度”之间的区别，
+并根据 `EvaluationResult` 更新 `mastered_skills`、`weak_points`、
+`completed_tasks`、`confidence` 和可追溯的知识点证据。
+
+### 今天完成
+
+* 新增 `KnowledgeMasteryStatus`，区分 `mastered`、`developing` 和 `weak`；
+* 新增 `KnowledgeMasteryEvidence`，保存知识点分数、掌握状态、
+  评估项目 ID 和真实源码文件；
+* 扩展 `MasteryProfile`，增加 `mastered_skills`、`completed_tasks`、
+  `confidence` 和 `knowledge_evidence`；
+* 新增 `mastery_updater.py`，将可靠评估结果汇总为掌握度画像；
+* 实现 `update_profile` LangGraph 节点，在节点边界恢复严格模型；
+* 保留 `uncertain` 和 `needs_human_review` 结果用于解释，
+  但不让它们产生虚假分数或已掌握结论；
+* 为阈值、可靠结果筛选、重复 ID、无可靠结果和节点输入输出
+  增加自动化测试。
+
+### 1. 自述能力不等于已掌握
+
+`LearnerProfile.known_skills` 表示用户对自己的初始描述，
+它可以影响路线难度和解释方式，但不能直接写入
+`MasteryProfile.mastered_skills`。
+
+已掌握结论必须来自实际评估证据：
+
+```text
+用户自述 known_skills
+        ≠
+评估证据确认 mastered_skills
+```
+
+这个区分防止 Agent 因为用户说“我会 LangGraph”，
+就跳过必要的评估和复习。
+
+### 2. 只有可靠结果参与计算
+
+`normalized_result_score()` 只接受：
+
+```text
+status == "evaluated"
+且 score 不是 None
+```
+
+然后使用 `score / max_score` 将不同满分的项目统一到 0 至 1。
+`uncertain` 表示系统无法可靠判断，
+`needs_human_review` 表示还在等待人工结论；
+二者都不应被当作零分，也不应被当作完成。
+
+### 3. 知识点掌握度阈值
+
+同一知识点可能被多道题评估。
+系统先汇总该知识点的可靠归一化得分，再计算平均值：
+
+```text
+score >= 0.80        → mastered
+0.60 <= score < 0.80 → developing
+score < 0.60         → weak
+```
+
+这组阈值同时被 8 月 25 日的重规划使用，
+因此定义在 `mastery_updater.py` 中作为唯一事实来源，
+避免不同模块使用不一致的分数边界。
+
+### 4. 薄弱点必须可追溯
+
+只返回 `weak_points=["条件路由"]` 还不够，
+因为用户无法知道这个结论从哪里来。
+`KnowledgeMasteryEvidence` 进一步保存：
+
+* 哪些 `assessment_item_ids` 支持结论；
+* 这些评估项目来自哪些 `source_files`；
+* 知识点的归一化得分和状态。
+
+因此后续补练或复习任务能够重新引用真实源码，
+而不是根据一个抽象标签自由生成。
+
+### 5. confidence 表示证据覆盖度
+
+`confidence` 不是 LLM 自己声明的主观信心，
+而是一个确定性比例：
+
+```text
+可靠评分项目数 / 所有评估项目数
+```
+
+当实践任务还在等待人工复核时，
+即使已有部分题目得分，`confidence` 也不会是 1.0。
+
+### 6. update_profile 节点的边界
+
+`update_profile` 只负责：
+
+1. 确认 State 中存在评估结果和 `TargetTask`；
+2. 把 checkpoint 恢复后可能出现的 dict 重新校验为 `EvaluationResult`；
+3. 调用纯函数 `build_mastery_profile()`；
+4. 只返回 `{"mastery": mastery}`。
+
+节点不覆盖 `learner_profile`，
+因此用户的初始自述与系统的证据画像可以并存。
+
+### 测试与验收
+
+测试覆盖：
+
+* 0.80 和 0.60 阈值；
+* 用户自述不会覆盖低分证据；
+* `uncertain` 和待人工复核结果不参与得分；
+* 薄弱点保留题目 ID 和源码路径；
+* 无可靠得分时保守产生 0 分和 0 覆盖度；
+* 重复评估 ID 被拒绝；
+* `update_profile` 能恢复 dict 结果并保持节点单一职责。
+
+8 月 24 日的针对性测试全部通过，
+验收标准“自述不等于掌握，薄弱点可追溯”已满足。
+
+### 核心认识
+
+学习者画像不是一份可以被 Agent 随意改写的标签列表，
+而是一个由可靠评估、真实源码和确定性规则共同支持的证据模型。
+
+---
+
+## 2026-08-25：自适应重新规划
+
+### 今天的目标
+
+理解 Reflection 节点与分数阈值路由，
+根据掌握度选择进入下一模块、增加针对性实践、增加复习或保守停止，
+并使用最多一次重规划的硬上限防止无限循环。
+
+### 今天完成
+
+* 新增 `ReplanAction` 和严格模型 `ReplanDecision`；
+* 为 `AgentState` 增加 `replan_decision`、`supplemental_tasks`、
+  `replan_count` 和 `max_replans`；
+* 在 `create_initial_state()` 中设置 `max_replans=1` 和独立空列表；
+* 新增 `mastery_replanner.py`，实现确定性分数分段决策；
+* 实现 `select_focus_evidence_for_replan()`，保持焦点优先级并拒绝无证据知识点；
+* 实现 `build_supplemental_task()`，生成可追溯的补练或复习任务；
+* 新增 `reflect_on_mastery` 和 `apply_mastery_replan` 节点；
+* 新增四分支 `route_after_mastery`；
+* 为新增状态类型补充 checkpoint Msgpack 精确白名单；
+* 完整测试集达到 157 个，全部通过。
+
+### 1. Reflection 是决策，不是执行
+
+`reflect_on_mastery` 读取 `MasteryProfile`、`replan_count` 和
+`max_replans`，返回 `ReplanDecision`。
+它不直接创建任务，也不提前增加重规划次数。
+
+```text
+MasteryProfile
+      ↓
+reflect_on_mastery
+      ↓
+ReplanDecision
+      ↓
+route_after_mastery
+```
+
+`apply_mastery_replan` 只处理 `add_practice` 和 `add_review`，
+在真正追加一项 `LearningTask` 后才把 `replan_count` 增加 1。
+这样可以区分“已经作出决定”和“已经完成重规划”。
+
+### 2. 三个分数区间
+
+```text
+overall_score >= 0.80        → advance
+0.60 <= overall_score < 0.80 → add_practice
+overall_score < 0.60         → add_review
+```
+
+0.80 和 0.60 是必须单独测试的边界值：
+
+* 0.80 已进入 `advance`；
+* 0.79 仍属于 `add_practice`；
+* 0.60 已进入 `add_practice`；
+* 0.59 属于 `add_review`。
+
+### 3. 判断顺序是业务语义的一部分
+
+`advance` 必须在次数上限之前判断。
+例如：
+
+```text
+score = 0.80
+replan_count = 1
+max_replans = 1
+```
+
+正确结果是 `advance`，不是 `stop`。
+因为次数上限只限制再次追加补充任务，
+不能阻止已经达标的学习者前进。
+
+如果先判断 `replan_count >= max_replans`，
+就会错误地把已达标的学习者留在当前模块。
+
+### 4. 补充任务必须对应薄弱点
+
+`ReplanDecision.focus_points` 不只是显示文本，
+它是补充任务的强制输入。
+`select_focus_evidence_for_replan()` 会：
+
+1. 把 `knowledge_evidence` 转换为知识点到证据的映射；
+2. 检查每个 `focus_point` 是否存在证据；
+3. 按 `focus_points` 的原始优先级顺序返回证据。
+
+如果一个知识点找不到对应证据，
+系统会抛出错误，不会为它猜测学习任务。
+
+### 5. 从证据构建 LearningTask
+
+`build_supplemental_task()` 仅允许处理：
+
+```text
+add_practice
+add_review
+```
+
+`advance` 和 `stop` 不需要补充任务，传入时会被拒绝。
+函数会收集焦点证据的 `source_files`，
+对重复路径去重，并在每个 `EvidenceSource.reason` 中记录
+该文件支持的知识点。
+
+任务的标题、目标、阅读要求、代码定位要求、实践内容和完成标准
+都显式包含 `focus_points`，使“新增任务与薄弱点对应”可以自动化验证。
+
+### 6. 有界重规划防止无限循环
+
+`create_initial_state()` 默认设置：
+
+```text
+replan_count = 0
+max_replans = 1
+```
+
+第一次追加补练或复习任务后，
+`apply_mastery_replan` 返回 `replan_count=1`。
+如果下次分数仍未达 0.80，Reflection 会返回 `stop`，
+而不是再次生成任务。
+
+这是业务级循环上限。LangGraph 的 `recursion_limit`
+仍然作为整个图的最后运行时熔断保险，两者职责不同。
+
+### 7. 为什么尚未接入 V0.6 主图
+
+当前主图在 `confirm_roadmap` 批准后到达 `END`。
+V0.7 已经有：
+
+```text
+generate_assessment
+→ evaluate_answers
+→ update_profile
+→ reflect_on_mastery
+→ route_after_mastery
+```
+
+但还没有“展示评估、收集 learner_answers、使用同一 thread_id 恢复”
+的中断节点。如果现在强行连边，`evaluate_answers`
+只能收到空答案，这不是完整的学习闭环。
+
+因此当前完成的是可独立测试和复用的节点、纯函数与路由，
+待答案提交协议完成后再一次性接入正式图。
+
+### 测试与验收
+
+自动化测试验证：
+
+* 0.80、0.79、0.60 和 0.59 进入正确分支；
+* 中间分数段选择 `developing` 和 `weak` 知识点；
+* 低分段优先选择 `weak` 知识点；
+* 缺少可追溯知识点证据时保守停止；
+* 补充任务保留焦点顺序、证据路径和完成标准；
+* 重复源文件不会生成重复 `EvidenceSource`；
+* `advance` 不会被转换为补充任务；
+* Reflection 节点不提前增加次数；
+* 应用节点保留已有补充任务，每次只追加一项；
+* 四种 `ReplanDecision.action` 都返回正确路由键。
+
+最终完整测试结果：
+
+```text
+157 passed in 4.12s
+```
+
+8 月 25 日验收标准全部通过：
+三个分数区间路由正确，新增任务与薄弱点和源码证据对应，
+且最多只重新规划一次。
+
+### 核心认识
+
+可靠的自适应 Agent 不是让 LLM 随意决定“再学什么”，
+而是先用评估证据形成掌握度，再用可测试的阈值和循环上限做决策，
+最后只允许任务引用决策焦点对应的真实仓库证据。

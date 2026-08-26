@@ -82,12 +82,13 @@ RepoMentor 后续将结合 openEuler 开源实习进行真实场景验证。
 
 ## 当前版本
 
-当前版本为 **V0.6 已完成 / V0.7 评估阶段**
+当前版本为 **V0.6 已完成 / V0.7 掌握度与重规划组件已完成**
 
 ## 当前已实现
 
 RepoMentor 当前已经完成 V0.2 个性化路线原型、V0.4 真实仓库证据层
-和 V0.6 LangGraph 自适应工作流，正在进入 V0.7 掌握度闭环。
+和 V0.6 LangGraph 自适应工作流。V0.7 已完成评估生成、
+答案评估、掌握度更新和有界重规划组件，待接入答案提交闭环。
 
 目前支持：
 
@@ -169,8 +170,16 @@ RepoMentor 当前已经完成 V0.2 个性化路线原型、V0.4 真实仓库证�
 - 概念题使用受限结构化评分草稿，解析失败或越界分数会保守标记为
   `uncertain`，不产生虚假高分；
 - 实践任务始终进入人工复核，不根据提交说明自动判定通过；
+- 新增 `update_profile` 节点，仅使用可靠评估结果更新
+  `mastered_skills`、`weak_points`、`completed_tasks` 和 `confidence`；
+- 将每个掌握结论追溯到评估项目 ID 和真实源码文件，
+  用户自述技能不会被直接当作已掌握证据；
+- 新增 `reflect_on_mastery`、`apply_mastery_replan` 和
+  `route_after_mastery`，按 80% / 60% 阈值决定前进、补练或复习；
+- 补充任务必须对应 `focus_points` 及其真实源码证据，
+  且默认最多重新规划一次；
 - 自适应工作流和掌握度模型均有自动化测试，
-  当前完整测试集为 **115 passed**。
+  当前完整测试集为 **157 passed**。
 
 
 
@@ -213,9 +222,9 @@ read_repo_file
 
 当前还没有完成：
 
-- 完整的 LangGraph 自适应闭环
-  （输入澄清分支和有限证据补充循环已完成，
-  人工确认、掌握度评估与重新规划仍在后续步骤）；
+- 完整的 V0.7 LangGraph 掌握度闭环
+  （评估、画像更新和有界重规划组件已完成，
+  答案提交的 interrupt/resume 协议仍待接入正式主图）；
 - 代码库 RAG 问答；
 - 测验和学习进度保存；
 - Streamlit 页面。
@@ -469,11 +478,14 @@ V0.7 当前完成了掌握度闭环的数据模型基础：
 - `QuizQuestion`：保存概念题和代码定位题；
 - `PracticeTask`：保存需要提交代码、测试、图示或说明的实践任务；
 - `EvaluationResult`：保存规则、模型或人工评估结果；
-- `MasteryProfile`：汇总知识点分数、优势、薄弱点和单项结果。
+- `KnowledgeMasteryEvidence`：把知识点结论追溯到评估项目和源码文件；
+- `MasteryProfile`：汇总知识点分数、已掌握技能、薄弱点、
+  已完成任务、证据覆盖度和单项结果；
+- `ReplanDecision`：保存 Reflection 产生的动作、理由、焦点和次数上限。
 
 每道题和实践任务都必须关联当前路线任务、真实仓库来源和知识点。
 `EvaluationResult` 会校验得分、最高分、状态和评分方式的一致性；
-`MasteryProfile` 会校验知识点分数范围和评估项目唯一性。
+`MasteryProfile` 会校验矦识点分数范围和评估项目唯一性。
 `AgentState.mastery` 已由临时 `dict` 占位升级为
 `MasteryProfile | None`。
 
@@ -508,9 +520,53 @@ practice      → needs_human_review
 `generate_assessment` 和 `evaluate_answers` 已作为独立节点完成并测试，
 当前尚未接入 V0.6 主图；完整答案提交中断协议将在 V0.7 后续步骤设计。
 
+### 证据驱动的学习者画像
+
+`mastery_updater.py` 仅统计 `status="evaluated"` 且存在得分的
+`EvaluationResult`。`uncertain` 和 `needs_human_review` 会被保留在画像中，
+但不参与分数、已完成任务或已掌握技能计算。
+
+同一知识点的可靠得分会先归一化到 0 至 1，再汇总为：
+
+```text
+score >= 0.80       → mastered
+0.60 <= score < 0.80 → developing
+score < 0.60        → weak
+```
+
+`KnowledgeMasteryEvidence` 同时保存 `assessment_item_ids` 和
+`source_files`，因此每个薄弱点都可以回溯到具体问题和源码。
+用户在 `LearnerProfile.known_skills` 中的自述不会自动进入
+`mastered_skills`，避免将“自认为会”当成“证据已证明”。
+
+### 有界的自适应重规划
+
+`mastery_replanner.py` 使用确定性阈值生成 `ReplanDecision`：
+
+```text
+overall_score >= 0.80       → advance
+0.60 <= overall_score < 0.80 → add_practice
+overall_score < 0.60        → add_review
+已达 max_replans             → stop
+```
+
+`advance` 优先于次数上限判断：`max_replans` 只阻止再次新增任务，
+不能阻止已经达标的学习者进入下一模块。补充任务只能使用
+`focus_points` 对应的 `KnowledgeMasteryEvidence.source_files`，
+且重复源文件会去重。
+
+`reflect_on_mastery` 只产生决定，`apply_mastery_replan` 在真正追加任务后
+才增加 `replan_count`。`route_after_mastery` 为 `advance`、
+`add_practice`、`add_review` 和 `stop` 提供四个稳定路由键。
+
+这些 V0.7 节点和路由已独立完成并测试，但未强行接入 V0.6 主图。
+原因是主图尚缺少收集 `learner_answers` 并使用 checkpoint 恢复的节点；
+在没有答案时直接进入评估会形成不完整流程。
+
 ## 当前限制
 
-当前项目已完成 V0.6 自适应工作流，正在开发 V0.7 掌握度闭环。
+当前项目已完成 V0.6 自适应工作流，并完成 V0.7 掌握度与
+有界重规划组件，正待接入答案提交和人工复核恢复协议。
 
 主要限制包括：
 
@@ -527,7 +583,8 @@ practice      → needs_human_review
   不会扫描或批量读取整个仓库；
 - 当前 checkpoint 使用进程内存保存，服务重启后不能恢复旧会话；
 - 当前尚未提供交互式 UI，人工确认通过工作流入口提交；
-- V0.7 评估生成和答案评估节点当前可独立调用，尚未接入主图；
+- V0.7 评估生成、答案评估、画像更新和重规划节点
+  当前可独立调用，尚未通过答案提交中断节点接入主图；
 - 当前不自动修改代码、不自动创建 PR。
 
 ## 当前演示效果
@@ -615,7 +672,14 @@ V0.6 ADAPTIVE WORKFLOW DEMO PASSED
 - 概念题正常评分会记录已体现和缺失的具体关键点；
 - 空回答不调用 LLM，解析失败和越界分数不会得到高分；
 - 实践任务无论是否提交说明都进入人工复核；
-- `evaluate_answers` 能正确分发三类项目并拒绝未知题目 ID。
+- `evaluate_answers` 能正确分发三类项目并拒绝未知题目 ID；
+- 用户自述技能不会越过评估证据进入 `mastered_skills`；
+- 只有可靠评分结果参与掌握度、已完成任务和证据覆盖度计算；
+- 每个薄弱点都保留评估项目 ID 和源码文件；
+- 80% 及 60% 两个边界值能正确路由到前进、补练或复习；
+- 补练和复习任务与 `focus_points` 和真实源码证据一致；
+- 完成一次重规划后不会再次追加任务，但掌握度达标仍可前进；
+- 当前完整测试集为 **157 passed**。
 
 运行全部测试：
 
@@ -633,16 +697,16 @@ python -m pytest tests/test_target_tool_calling.py -v
 
 ## 后续计划
 
-项目将在已完成的输入澄清、有限证据循环和人工确认恢复上，
+项目将在已完成的输入澄清、有限证据循环、人工确认恢复、
+评估、画像更新和有界重规划组件上，
 按照以下顺序继续开发：
 
-1. 根据评估结果更新学习者掌握度画像；
-2. 根据薄弱点重新规划后续任务；
-3. 将评估生成、答案提交和结果更新接入主图；
-4. 增加开源贡献准备度评估；
-5. 增加代码库 RAG 问答；
-6. 将内存 checkpoint 升级为持久化存储；
-7. 保存用户学习进度并提供可交互界面。
+1. 增加答案提交和人工复核的 interrupt/resume 节点；
+2. 将评估生成、答案评估、画像更新和重规划接入主图；
+3. 增加开源贡献准备度评估；
+4. 增加代码库 RAG 问答；
+5. 将内存 checkpoint 升级为持久化存储；
+6. 保存用户学习进度并提供可交互界面。
 
 ## 当前暂不实现
 

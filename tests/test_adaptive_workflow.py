@@ -11,6 +11,7 @@ from repo_mentor.models import (
     LearningTask,
     TargetTask,
     RepositoryEvidence,
+    ReplanDecision,
 )
 from repo_mentor.repository_safeguards import EvidenceBudget
 from repo_mentor.adaptive_workflow import (
@@ -23,8 +24,7 @@ from repo_mentor.adaptive_workflow import (
     route_after_request,
     route_after_evidence,
     route_after_confirmation,
-    start_adaptive_workflow,
-    resume_adaptive_workflow,
+    route_after_mastery,
 )
 
 
@@ -844,3 +844,73 @@ def test_revising_target_regenerates_roadmap(
         make_thread_config(thread_id)
     )
     assert final_snapshot.next == ()
+
+def test_initial_state_has_bounded_replan_defaults():
+    """重新规划默认最多执行一次。"""
+    first = create_initial_state(
+        make_learner(),
+        make_target(),
+    )
+    second = create_initial_state(
+        make_learner(),
+        make_target(),
+    )
+
+    assert first["replan_decision"] is None
+    assert first["supplemental_tasks"] == []
+    assert first["replan_count"] == 0
+    assert first["max_replans"] == 1
+
+    assert (
+        first["supplemental_tasks"]
+        is not second["supplemental_tasks"]
+    )
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        "advance",
+        "add_practice",
+        "add_review",
+        "stop",
+    ],
+)
+def test_route_after_mastery_returns_decision_action(
+    action: str,
+):
+    """掌握度路由应原样返回四种合法决定。"""
+    focus_points = (
+        ["条件路由"]
+        if action in {
+            "add_practice",
+            "add_review",
+        }
+        else []
+    )
+    decision = ReplanDecision(
+        action=action,
+        overall_score=0.70,
+        reason="用于验证掌握度条件路由。",
+        focus_points=focus_points,
+        replan_count=0,
+        max_replans=1,
+    )
+
+    result = route_after_mastery({
+        # 模拟 checkpoint 恢复后的字典状态。
+        "replan_decision": decision.model_dump(
+            mode="json"
+        ),
+    })
+
+    assert result == action
+
+
+def test_route_after_mastery_requires_decision():
+    """路由不能在缺少 Reflection 结果时猜测。"""
+    with pytest.raises(
+        ValueError,
+        match="必须存在 ReplanDecision",
+    ):
+        route_after_mastery({})

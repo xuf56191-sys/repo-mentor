@@ -14,7 +14,12 @@ from langgraph.graph import START, END, StateGraph
 from langgraph.types import Command
 
 from repo_mentor import adaptive_nodes
-from repo_mentor.models import LearnerProfile, LearningRoadmap, TargetTask
+from repo_mentor.models import (
+    LearnerProfile,
+    LearningRoadmap,
+    ReplanDecision,
+    TargetTask,
+)
 from repo_mentor.workflow_state import (
     AgentState,
     create_initial_state,
@@ -37,6 +42,9 @@ CHECKPOINT_ALLOWED_MSGPACK_MODULES = [
     ("repo_mentor.models", "AssessmentPackage"),
     ("repo_mentor.models", "EvaluationResult"),
     ("repo_mentor.models", "MasteryProfile"),
+    ("repo_mentor.models", "KnowledgeMasteryEvidence"),
+    ("repo_mentor.models", "ReplanDecision"),
+    ("repo_mentor.models", "LearningTask"),
     (
         "repo_mentor.repository_safeguards",
         "EvidenceBudget",
@@ -308,3 +316,30 @@ def route_after_confirmation(
         "人工确认路由收到非法状态："
         f"{status!r}"
     )
+
+
+# ---------------- 路由 4：根据掌握度反思决定下一步 ----------------
+
+def route_after_mastery(
+    state: AgentState,
+) -> Literal[
+    "advance",
+    "add_practice",
+    "add_review",
+    "stop",
+]:
+    """把 ReplanDecision.action 转换为条件边路由键。"""
+    raw_decision = state.get("replan_decision")
+
+    if raw_decision is None:
+        raise ValueError(
+            "掌握度路由前必须存在 ReplanDecision"
+        )
+
+    # Checkpoint 恢复后可能是 dict，
+    # 路由边界同样使用严格模型校验。
+    decision = ReplanDecision.model_validate(
+        raw_decision
+    )
+
+    return decision.action

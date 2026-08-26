@@ -26,6 +26,8 @@ from repo_mentor.models import (
     RepositoryEvidence,
     RoadmapConfirmation,
     TargetTask,
+    LearningTask,
+    ReplanDecision,
 )
 
 from repo_mentor.models import (
@@ -59,6 +61,19 @@ class AgentState(TypedDict, total=False):
 
     # 产生：evaluate_answers/update_profile；消费：replan
     mastery: MasteryProfile | None
+    # ---------- Reflection 与重新规划 ----------
+    # 产生：reflect_on_mastery；消费：条件路由和 replan 节点
+    replan_decision: ReplanDecision | None
+
+    # 产生：add_practice/add_review；消费：最终输出或后续路线
+    supplemental_tasks: list[LearningTask]
+
+    # 产生：replan 节点；消费：Reflection 终止条件
+    replan_count: int
+
+    # 产生：create_initial_state；消费：Reflection
+    max_replans: int
+
     # ---------- 评估 ----------
     # 产生：generate_assessment；消费：evaluate_answers
     assessment: AssessmentPackage | None
@@ -128,6 +143,10 @@ def create_initial_state(
         "learner_answers": {},   #用户尚未回答；
         "evaluation_results": [],   #尚无评分结果；
         "mastery": None,   #尚无足够结果形成画像。
+        "replan_decision": None,
+        "supplemental_tasks": [],
+        "replan_count": 0,
+        "max_replans": 1,
     }
 
 
