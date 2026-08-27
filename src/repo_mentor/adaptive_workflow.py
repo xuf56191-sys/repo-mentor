@@ -4,6 +4,7 @@
 - build_adaptive_graph()：组装并编译图，返回可 invoke 的 app；
 - start_adaptive_workflow(...)：使用 thread_id 启动可中断会话；
 - resume_adaptive_workflow(...)：使用同一 thread_id 恢复会话；
+- resume_mastery_workflow(...)：使用同一 thread_id 提交评估答案；
 - run_adaptive_workflow(...)：兼容旧的一次性调用，自动批准生成的路线。
 """
 
@@ -40,6 +41,7 @@ CHECKPOINT_ALLOWED_MSGPACK_MODULES = [
     ("repo_mentor.models", "LearningRoadmap"),
     ("repo_mentor.models", "RoadmapConfirmation"),
     ("repo_mentor.models", "AssessmentPackage"),
+    ("repo_mentor.models", "AssessmentSubmission"),
     ("repo_mentor.models", "EvaluationResult"),
     ("repo_mentor.models", "MasteryProfile"),
     ("repo_mentor.models", "KnowledgeMasteryEvidence"),
@@ -77,8 +79,10 @@ def make_thread_config(thread_id: str) -> dict[str, Any]:
 
 def build_adaptive_graph(
     checkpointer=None,
+    *,
+    enable_mastery_loop: bool = False,
 ):
-    """组装并编译基础图，返回支持 checkpoint 的 app。"""
+    """组装基础图，可选启用 V0.7 掌握度闭环。"""
     if checkpointer is None:
         checkpointer = create_memory_checkpointer()
 
@@ -110,6 +114,32 @@ def build_adaptive_graph(
         "apply_human_revision",
         adaptive_nodes.apply_human_revision,
     )
+
+    if enable_mastery_loop:
+        graph.add_node(
+            "generate_assessment",
+            adaptive_nodes.generate_assessment,
+        )
+        graph.add_node(
+            "collect_learner_answers",
+            adaptive_nodes.collect_learner_answers,
+        )
+        graph.add_node(
+            "evaluate_answers",
+            adaptive_nodes.evaluate_answers,
+        )
+        graph.add_node(
+            "update_profile",
+            adaptive_nodes.update_profile,
+        )
+        graph.add_node(
+            "reflect_on_mastery",
+            adaptive_nodes.reflect_on_mastery,
+        )
+        graph.add_node(
+            "apply_mastery_replan",
+            adaptive_nodes.apply_mastery_replan,
+        )
 
     # 连边：定义执行顺序（与流程图一致）
     graph.add_edge(START, "inspect_request")
@@ -147,11 +177,16 @@ def build_adaptive_graph(
         "generate_roadmap",
         "confirm_roadmap",
     )
+    approved_target = (
+        "generate_assessment"
+        if enable_mastery_loop
+        else END
+    )
     graph.add_conditional_edges(
         "confirm_roadmap",
         route_after_confirmation,
         {
-            "approved": END,
+            "approved": approved_target,
             "revision_requested": "apply_human_revision",
         },
     )
@@ -167,6 +202,38 @@ def build_adaptive_graph(
         "conservative_evidence_stop",
         END,
     )
+
+    if enable_mastery_loop:
+        graph.add_edge(
+            "generate_assessment",
+            "collect_learner_answers",
+        )
+        graph.add_edge(
+            "collect_learner_answers",
+            "evaluate_answers",
+        )
+        graph.add_edge(
+            "evaluate_answers",
+            "update_profile",
+        )
+        graph.add_edge(
+            "update_profile",
+            "reflect_on_mastery",
+        )
+        graph.add_conditional_edges(
+            "reflect_on_mastery",
+            route_after_mastery,
+            {
+                "advance": END,
+                "add_practice": "apply_mastery_replan",
+                "add_review": "apply_mastery_replan",
+                "stop": END,
+            },
+        )
+        graph.add_edge(
+            "apply_mastery_replan",
+            END,
+        )
 
 
     # 编译：校验图合法性（无孤立节点、无非法边）
@@ -203,6 +270,19 @@ def resume_adaptive_workflow(
     """用人工决定恢复已中断的同一会话。"""
     return app.invoke(
         Command(resume=confirmation),
+        config=make_thread_config(thread_id),
+    )
+
+
+def resume_mastery_workflow(
+    app,
+    *,
+    thread_id: str,
+    answers: dict[str, str],
+) -> dict[str, Any]:
+    """用学习者答案恢复评估中断。"""
+    return app.invoke(
+        Command(resume={"answers": answers}),
         config=make_thread_config(thread_id),
     )
 

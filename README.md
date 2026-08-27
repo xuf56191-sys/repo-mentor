@@ -82,13 +82,13 @@ RepoMentor 后续将结合 openEuler 开源实习进行真实场景验证。
 
 ## 当前版本
 
-当前版本为 **V0.6 已完成 / V0.7 掌握度与重规划组件已完成**
+当前版本为 **V0.7 掌握度学习闭环已完成**
 
 ## 当前已实现
 
 RepoMentor 当前已经完成 V0.2 个性化路线原型、V0.4 真实仓库证据层
 和 V0.6 LangGraph 自适应工作流。V0.7 已完成评估生成、
-答案评估、掌握度更新和有界重规划组件，待接入答案提交闭环。
+答案提交中断、混合评估、掌握度更新、有界重规划和 SQLite 进度恢复。
 
 目前支持：
 
@@ -178,8 +178,16 @@ RepoMentor 当前已经完成 V0.2 个性化路线原型、V0.4 真实仓库证�
   `route_after_mastery`，按 80% / 60% 阈值决定前进、补练或复习；
 - 补充任务必须对应 `focus_points` 及其真实源码证据，
   且默认最多重新规划一次；
+- 新增 `AssessmentSubmission` 和 `collect_learner_answers`，
+  使用同一 `thread_id` 从测验中断恢复并提交答案；
+- `build_adaptive_graph(enable_mastery_loop=True)` 可运行完整
+  “规划→测验→评估→画像→重规划”闭环；
+- 新增 SQLite 进度存储，自动创建仓库、学习者、路线、
+  任务和评估结果表，支持重启后恢复路线和薄弱点；
+- 提供 `demo_mastery_loop.py` 离线端到端演示，
+  记录初始路线、评估分数和证据驱动的任务调整；
 - 自适应工作流和掌握度模型均有自动化测试，
-  当前完整测试集为 **157 passed**。
+  当前完整测试集为 **171 passed**。
 
 
 
@@ -222,9 +230,7 @@ read_repo_file
 
 当前还没有完成：
 
-- 完整的 V0.7 LangGraph 掌握度闭环
-  （评估、画像更新和有界重规划组件已完成，
-  答案提交的 interrupt/resume 协议仍待接入正式主图）；
+- 多轮评估和人工复核完成后再次进入自动评估的长周期闭环；
 - 代码库 RAG 问答；
 - 测验和学习进度保存；
 - Streamlit 页面。
@@ -485,7 +491,7 @@ V0.7 当前完成了掌握度闭环的数据模型基础：
 
 每道题和实践任务都必须关联当前路线任务、真实仓库来源和知识点。
 `EvaluationResult` 会校验得分、最高分、状态和评分方式的一致性；
-`MasteryProfile` 会校验矦识点分数范围和评估项目唯一性。
+`MasteryProfile` 会校验知识点分数范围和评估项目唯一性。
 `AgentState.mastery` 已由临时 `dict` 占位升级为
 `MasteryProfile | None`。
 
@@ -517,8 +523,10 @@ practice      → needs_human_review
 模型调用或解析失败、返回无效草稿、分数超过题目上限时，
 结果均为 `uncertain + score=None`。
 
-`generate_assessment` 和 `evaluate_answers` 已作为独立节点完成并测试，
-当前尚未接入 V0.6 主图；完整答案提交中断协议将在 V0.7 后续步骤设计。
+`generate_assessment` 后连接 `collect_learner_answers`，
+图会返回包含结构化评估包的 `assessment_submission` 中断。
+调用方使用同一 `thread_id` 和 `Command(resume=...)` 提交
+`AssessmentSubmission`，然后继续进入 `evaluate_answers`。
 
 ### 证据驱动的学习者画像
 
@@ -559,14 +567,42 @@ overall_score < 0.60        → add_review
 才增加 `replan_count`。`route_after_mastery` 为 `advance`、
 `add_practice`、`add_review` 和 `stop` 提供四个稳定路由键。
 
-这些 V0.7 节点和路由已独立完成并测试，但未强行接入 V0.6 主图。
-原因是主图尚缺少收集 `learner_answers` 并使用 checkpoint 恢复的节点；
-在没有答案时直接进入评估会形成不完整流程。
+为保持 V0.6 调用兼容，默认 `enable_mastery_loop=False`；
+设置为 `True` 后，路线批准会继续执行：
+
+```text
+generate_assessment
+→ collect_learner_answers (interrupt)
+→ evaluate_answers
+→ update_profile
+→ reflect_on_mastery
+→ route_after_mastery
+→ apply_mastery_replan / END
+```
+
+### SQLite 学习进度持久化
+
+`progress_store.py` 使用 Python 内置 `sqlite3`，首次运行自动创建：
+
+```text
+repositories
+└─ learner_profiles
+   └─ plans
+      ├─ tasks
+      └─ assessment_results
+```
+
+仓库规范路径具有唯一约束，各子表通过外键隔离不同仓库的数据。
+Pydantic 对象使用 JSON 保存，仓库 ID、任务类型、顺序和时间戳使用普通列。
+学习者、路线、任务和评估结果在同一事务中保存，任一写入失败时整体回滚。
+
+`load_latest_progress()` 按仓库路径和学习者键恢复最新
+`LearningRoadmap`、`MasteryProfile`、`ReplanDecision`、补充任务和
+`EvaluationResult`。数据库文件保存在本地并已加入 `.gitignore`。
 
 ## 当前限制
 
-当前项目已完成 V0.6 自适应工作流，并完成 V0.7 掌握度与
-有界重规划组件，正待接入答案提交和人工复核恢复协议。
+当前项目已完成 V0.6 自适应工作流和 V0.7 掌握度学习闭环。
 
 主要限制包括：
 
@@ -583,8 +619,10 @@ overall_score < 0.60        → add_review
   不会扫描或批量读取整个仓库；
 - 当前 checkpoint 使用进程内存保存，服务重启后不能恢复旧会话；
 - 当前尚未提供交互式 UI，人工确认通过工作流入口提交；
-- V0.7 评估生成、答案评估、画像更新和重规划节点
-  当前可独立调用，尚未通过答案提交中断节点接入主图；
+- V0.7 当前完成一轮评估和最多一次重规划，
+  尚未自动进入补充任务的第二轮评估；
+- SQLite 已持久化学习进度，但 LangGraph 运行位置仍由
+  `InMemorySaver` 保存，进程重启后不能恢复未完成的中断点；
 - 当前不自动修改代码、不自动创建 PR。
 
 ## 当前演示效果
@@ -610,6 +648,26 @@ overall_score < 0.60        → add_review
 == 最终路线已批准 ==
 确认状态：approved
 V0.6 ADAPTIVE WORKFLOW DEMO PASSED
+```
+
+V0.7 离线闭环演示：
+
+```powershell
+$env:PYTHONPATH = (Resolve-Path .\src).Path
+python -m repo_mentor.demo_mastery_loop
+```
+
+演示使用正式图、checkpoint、评估规则、画像更新、重规划和 SQLite，
+只将需要网络的 LLM 调用替换为离线固定结果。示例结果：
+
+```text
+roadmap_confirmation
+→ assessment_submission
+→ mastery = 0.2
+→ weak_points = 证据流程、代码定位
+→ add_review
+→ 新增复习任务
+→ SQLite 恢复成功
 ```
 
 当前测试说明：
@@ -679,7 +737,15 @@ V0.6 ADAPTIVE WORKFLOW DEMO PASSED
 - 80% 及 60% 两个边界值能正确路由到前进、补练或复习；
 - 补练和复习任务与 `focus_points` 和真实源码证据一致；
 - 完成一次重规划后不会再次追加任务，但掌握度达标仍可前进；
-- 当前完整测试集为 **157 passed**。
+- `AssessmentSubmission` 拒绝空答案集，答案节点能从 checkpoint
+  恢复并保留评估项顺序；
+- 可选 V0.7 图使用同一 `thread_id` 完成路线确认和答案提交
+  两次恢复，并在低分后产生可追溯复习任务；
+- SQLite 首次运行自动建表，重复仓库注册幂等，
+  不同仓库数据隔离；
+- 新 Store 对象可恢复路线、薄弱点、评估结果和补充任务；
+- 事务失败后不残留部分 plan、task 或 assessment result；
+- 当前完整测试集为 **171 passed**。
 
 运行全部测试：
 
@@ -697,16 +763,14 @@ python -m pytest tests/test_target_tool_calling.py -v
 
 ## 后续计划
 
-项目将在已完成的输入澄清、有限证据循环、人工确认恢复、
-评估、画像更新和有界重规划组件上，
+项目将在已完成的 V0.7 掌握度学习闭环和 SQLite 进度存储上，
 按照以下顺序继续开发：
 
-1. 增加答案提交和人工复核的 interrupt/resume 节点；
-2. 将评估生成、答案评估、画像更新和重规划接入主图；
-3. 增加开源贡献准备度评估；
-4. 增加代码库 RAG 问答；
-5. 将内存 checkpoint 升级为持久化存储；
-6. 保存用户学习进度并提供可交互界面。
+1. 增加开源贡献准备度评估；
+2. 增加代码库 RAG 问答；
+3. 将内存 checkpoint 升级为持久化存储；
+4. 将人工复核结论接回第二轮掌握度评估；
+5. 提供用户可交互界面。
 
 ## 当前暂不实现
 
@@ -758,8 +822,12 @@ repo-mentor/
 │       ├── adaptive_workflow.py
 │       ├── assessment_generator.py
 │       ├── assessment_evaluator.py
+│       ├── mastery_updater.py
+│       ├── mastery_replanner.py
+│       ├── progress_store.py
 │       ├── checkpoint_interrupt_demo.py
-│       └── demo_adaptive_flow.py
+│       ├── demo_adaptive_flow.py
+│       └── demo_mastery_loop.py
 ├── tests/
 │   ├── test_repository_ranker.py
 │   ├── test_repository_tools.py
@@ -770,6 +838,10 @@ repo-mentor/
 │   ├── test_assessment_generator.py
 │   ├── test_assessment_evaluator.py
 │   ├── test_assessment_models.py
+│   ├── test_mastery_updater.py
+│   ├── test_mastery_replanner.py
+│   ├── test_progress_store.py
+│   ├── test_demo_mastery_loop.py
 │   ├── test_roadmap_confirmation.py
 │   └── test_adaptive_workflow.py
 ├── pytest.ini

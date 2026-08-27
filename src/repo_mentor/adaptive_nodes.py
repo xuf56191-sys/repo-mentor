@@ -10,6 +10,7 @@
 - generate_roadmap      ：调用 LLM 生成学习路线
 - confirm_roadmap       ：暂停图并等待用户确认路线
 - generate_assessment   ：调用 LLM 生成证据约束的评估包
+- collect_learner_answers：暂停图并等待学习者提交答案
 - evaluate_answers      ：组合规则、模型和人工复核结果
 - update_profile        ：根据实际评估证据更新掌握度画像
 - reflect_on_mastery    ：根据掌握度和次数上限作出重规划决定
@@ -35,6 +36,7 @@ from repo_mentor.models import (
     LearningTask,
     MasteryProfile,
     ReplanDecision,
+    AssessmentSubmission,
 )
 from repo_mentor.repository_ranker import (
     extract_target_keywords,  # 从目标任务提取文件路径关键词
@@ -662,7 +664,55 @@ def generate_assessment(
         "assessment": assessment,
     }
 
-# ---------------- 节点 12：组合评估学习者答案 ----------------
+# ---------------- 节点 12：暂停并收集学习者答案 ----------------
+
+def collect_learner_answers(
+    state: AgentState,
+) -> dict:
+    """展示结构化评估，并等待学习者提交答案。"""
+    # 1：读取 assessment，并检查是否存在。
+    raw_assessment = state.get("assessment")
+    if raw_assessment is None:
+        raise ValueError("收集答案前必须存在 AssessmentPackage")
+
+    # 2：恢复 checkpoint 中可能保存为 dict 的模型。
+    assessment = AssessmentPackage.model_validate(
+        raw_assessment
+    )
+
+    # 3：保持两道问题在前、实践任务在后的顺序。
+
+    expected_item_ids = [
+        question.question_id
+        for question in assessment.questions
+    ]
+    expected_item_ids.append(
+        assessment.practice_task.practice_id
+    )
+
+    # 答案 4：暂停工作流，并把测验展示给调用方。
+    raw_submission = interrupt({
+        "kind": "assessment_submission",
+        "question": "请完成当前测验并提交答案。",
+        "assessment": assessment.model_dump(
+            mode="json"
+        ),
+        "expected_item_ids": expected_item_ids,
+    })
+
+    # 答案 5：恢复后校验提交数据的结构。
+    submission = AssessmentSubmission.model_validate(
+        raw_submission
+    )
+
+    # 答案 6：只把答案字典写入共享 State。
+    return {
+        "learner_answers": dict(
+            submission.answers
+        ),
+    }
+
+# ---------------- 节点 13：组合评估学习者答案 ----------------
 
 def evaluate_answers(
     state: AgentState,
@@ -755,7 +805,7 @@ def evaluate_answers(
     }
 
 
-# ---------------- 节点 13：更新证据驱动的掌握度画像 ----------------
+# ---------------- 节点 14：更新证据驱动的掌握度画像 ----------------
 
 def update_profile(
     state: AgentState,
@@ -799,7 +849,7 @@ def update_profile(
     }
 
 
-# ---------------- 节点 14：反思掌握度并决定下一步 ----------------
+# ---------------- 节点 15：反思掌握度并决定下一步 ----------------
 
 def reflect_on_mastery(
     state: AgentState,
@@ -831,7 +881,7 @@ def reflect_on_mastery(
     }
 
 
-# ---------------- 节点 15：应用有界的自适应重规划 ----------------
+# ---------------- 节点 16：应用有界的自适应重规划 ----------------
 
 def apply_mastery_replan(
     state: AgentState,

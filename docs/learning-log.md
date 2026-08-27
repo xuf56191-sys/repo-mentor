@@ -3214,3 +3214,227 @@ generate_assessment
 可靠的自适应 Agent 不是让 LLM 随意决定“再学什么”，
 而是先用评估证据形成掌握度，再用可测试的阈值和循环上限做决策，
 最后只允许任务引用决策焦点对应的真实仓库证据。
+
+---
+
+## 2026-08-26：SQLite 学习进度持久化
+
+### 今天的目标
+
+学习 SQLite、主键、外键、唯一约束、时间戳和最小表设计，
+让 RepoMentor 在 Python 进程结束后仍能恢复路线、薄弱点、补充任务和评估结果。
+
+### 今天完成
+
+* 新增 `progress_store.py`；
+* 使用 Python 内置 `sqlite3`，无需增加第三方依赖；
+* 首次构造 `SQLiteProgressStore` 时自动创建数据库目录和表；
+* 建立 `repositories`、`learner_profiles`、`plans`、`tasks`、
+  `assessment_results` 五张业务表；
+* 使用规范化仓库路径和唯一约束实现幂等注册；
+* 对 Windows 路径执行 `casefold()`，避免大小写不同产生重复仓库；
+* 每个 SQLite 连接都显式开启外键；
+* 使用会话上下文保证连接被关闭，使用 Connection 上下文
+  保证事务提交或回滚；
+* 使用参数化 SQL，不将用户路径拼接进查询字符串；
+* 将 Pydantic 模型保存为 JSON，同时保留可查询的仓库 ID、顺序、
+  任务类型和时间戳列；
+* 数据库文件加入 `.gitignore`；
+* 9 个持久化测试和当时全部 166 个测试通过。
+
+### 1. AgentState、Checkpointer 和 SQLite 的区别
+
+```text
+AgentState
+    当前图执行中的业务数据
+
+InMemorySaver
+    根据 thread_id 恢复暂停位置和当前 State
+
+SQLiteProgressStore
+    跨 Python 进程保存已完成的长期学习进度
+```
+
+`thread_id` 是运行会话定位键，`repository_id` 是长期业务数据隔离键。
+它们职责不同，不应互相替代，也不需要都写入 `AgentState`。
+
+### 2. 为什么同时使用关系列和 JSON
+
+如果把整个 State 直接保存成一大段 JSON，
+恢复很方便，但无法简单查询某个仓库、某类任务或某道评估结果。
+如果把每个 Pydantic 字段都拆成数据库列，Schema 会变得很大，
+模型字段变更时迁移成本也很高。
+
+当前方案将关联和查询需要的字段放在普通列，
+将完整领域模型放在 JSON 列，并在加载时再次执行
+`model_validate()`。这同时保留了查询能力和领域模型边界。
+
+### 3. 仓库隔离
+
+`repositories.canonical_path` 具有唯一约束。
+相同规范路径使用 `ON CONFLICT ... DO UPDATE`，因此重复注册
+仍返回同一 `repository_id`。学习者、路线、任务和评估都通过外键
+间接归属到该仓库，因此加载仓库 A 时不会返回仓库 B 的路线。
+
+### 4. 事务与回滚
+
+`learner_profiles`、`plans`、`tasks` 和 `assessment_results`
+在同一 Connection 事务中写入。
+测试故意提交两条相同 `item_id` 的评估结果，
+触发唯一约束错误。事务回滚后，不会残留孤立的 plan 或 task。
+
+### 5. 重启恢复验收
+
+测试先使用一个 `SQLiteProgressStore` 保存进度，
+再用同一数据库路径创建全新 Store 对象，最后验证：
+
+* `LearningRoadmap` 恢复为严格模型；
+* `MasteryProfile.weak_points` 保持不变；
+* `ReplanDecision` 可恢复；
+* 补充任务顺序保持不变；
+* 评估结果可追溯到原题目和源码。
+
+8 月 26 日验收标准全部通过。
+
+### 核心认识
+
+Checkpoint 是“运行恢复”，SQLite 学习进度是“业务恢复”。
+生产级 Agent 通常同时需要两者。
+
+---
+
+## 2026-08-27：V0.7 学习闭环验收
+
+### 今天的目标
+
+完成一次“规划→学习→测验→评估→画像更新→重新规划”的
+端到端演示，记录初始路线和低分评估后的任务调整，
+并解释这为什么不是一次普通 Prompt。
+
+### 今天完成
+
+* 新增 `AssessmentSubmission`，约束 interrupt 恢复时的答案结构；
+* 新增 `collect_learner_answers` 节点，展示评估包并暂停图；
+* 新增 `resume_mastery_workflow()`，使用同一 `thread_id` 提交答案；
+* `build_adaptive_graph()` 新增 `enable_mastery_loop` 可选参数；
+* 默认仍保持 V0.6 批准后结束的兼容行为；
+* 启用 V0.7 时注册并连接 6 个评估与掌握度节点；
+* 新增同一 `thread_id` 两次恢复的端到端测试；
+* 新增 `demo_mastery_loop.py` 离线演示；
+* 演示将最终进度写入 SQLite，再用新 Store 对象恢复；
+* 实际演示产生 0.2 掌握度、两个薄弱点和一项复习任务；
+* 完整测试集达到 171 个，全部通过。
+
+### 1. 答案提交也是 Human-in-the-loop
+
+路线确认不是唯一需要 `interrupt()` 的地方。
+生成测验后，工作流必须离开 Python 执行流，等待学习者思考和提交答案。
+
+`collect_learner_answers` 首次运行时返回：
+
+```text
+kind = assessment_submission
+assessment = 结构化评估包
+expected_item_ids = 两道题 + 一个实践任务
+```
+
+调用方用相同 `thread_id` 和 `Command(resume={"answers": ...})`
+恢复后，`interrupt()` 才将提交值返回节点。
+`AssessmentSubmission` 先校验数据结构，`evaluate_answers`
+再结合当前 `AssessmentPackage` 拒绝未知题目 ID。
+
+### 2. 为什么 V0.7 是可选图模式
+
+原有 `run_adaptive_workflow()` 和 V0.6 演示的契约是：
+路线批准后到达 `END` 并返回 `LearningRoadmap`。
+如果直接将批准分支改为答案中断，所有旧调用都会多出一次暂停。
+
+因此新增：
+
+```python
+build_adaptive_graph(enable_mastery_loop=True)
+```
+
+默认值为 `False`，保持 V0.6 兼容；显式启用时才接入 V0.7 节点。
+
+### 3. 完整节点接力
+
+```text
+inspect_request
+→ analyze_learner
+→ analyze_target
+→ collect_evidence
+→ generate_roadmap
+→ confirm_roadmap (interrupt 1)
+→ generate_assessment
+→ collect_learner_answers (interrupt 2)
+→ evaluate_answers
+→ update_profile
+→ reflect_on_mastery
+→ route_after_mastery
+→ apply_mastery_replan / END
+```
+
+端到端测试使用同一 `thread_id` 先批准路线，再提交答案。
+如果换用另一 `thread_id`，Checkpointer 就无法找到当前评估包和暂停节点。
+
+### 4. 初始路线与评估后调整
+
+离线演示的初始任务是：
+
+```text
+定位并解释目录树生成流程
+```
+
+演示回答只部分解释了证据流程，并提交了错误的文件定位。
+两道可靠评分题目的归一化得分是 0.4 和 0.0，
+实践任务仍待人工复核，因此总体掌握度为：
+
+```text
+(0.4 + 0.0) / 2 = 0.2
+```
+
+Reflection 进入 `add_review`，针对“证据流程”和“代码定位”
+产生一项引用真实仓库文件的复习任务。
+
+### 5. 为什么这不是一次普通 Prompt
+
+一次普通 Prompt 通常是“输入文本→模型输出文本”。
+RepoMentor V0.7 则包含：
+
+* 跨节点的结构化 `AgentState`；
+* 来自真实仓库文件的可追溯证据；
+* 两次需要图外人类输入的 `interrupt/resume`；
+* 规则、LLM 和人工复核的混合评估；
+* 由 Python 确定性计算的掌握度和分数阈值；
+* 有次数上限的条件路由；
+* 事务化 SQLite 保存和跨进程恢复；
+* 离线、可重复的端到端自动化测试。
+
+LLM 只负责适合语义生成和语义判断的部分，
+数据边界、证据权限、得分计算、路由和循环上限均由可测试代码控制。
+
+### 测试与验收
+
+新增测试覆盖：
+
+* `collect_learner_answers` 的 payload、项目顺序和恢复结果；
+* 缺少 `AssessmentPackage` 时拒绝进入答案中断；
+* V0.7 可选图的 6 个新节点和完整连边；
+* 同一 `thread_id` 两次恢复并最终到达 `END`；
+* 低分结果产生两个可追溯薄弱点和一项复习任务；
+* 演示最终进度写入 SQLite 后可以由新 Store 恢复。
+
+最终全量结果：
+
+```text
+171 passed in 4.32s
+```
+
+8 月 27 日验收标准全部通过。
+
+### 核心认识
+
+Agent 的价值不在于把一个长 Prompt 分成多段，
+而在于让状态、证据、人类决定、确定性规则、模型推理、条件路由和持久化
+在可解释、可中断、可恢复和可测试的工作流中协作。

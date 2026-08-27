@@ -38,6 +38,7 @@ from repo_mentor.adaptive_nodes import (
     confirm_roadmap,
     apply_human_revision,
     generate_assessment,
+    collect_learner_answers,
     evaluate_answers,
     update_profile,
     reflect_on_mastery,
@@ -916,6 +917,61 @@ def test_evaluate_answers_dispatches_three_item_types(
         location_result,
         practice_result,
     ]
+
+
+def test_collect_learner_answers_interrupts_and_restores(
+    monkeypatch,
+):
+    """答案节点应展示评估包，并校验恢复数据。"""
+    from repo_mentor import adaptive_nodes
+
+    assessment = make_node_assessment()
+    captured = {}
+    answers = {
+        "question-concept": "thread_id 用于定位 checkpoint",
+        "question-location": (
+            "src/repo_mentor/adaptive_workflow.py"
+        ),
+        "practice-workflow": "已补充节点结构测试",
+    }
+
+    def fake_interrupt(payload):
+        captured["payload"] = payload
+        return {"answers": answers}
+
+    monkeypatch.setattr(
+        adaptive_nodes,
+        "interrupt",
+        fake_interrupt,
+    )
+
+    result = collect_learner_answers({
+        "assessment": assessment.model_dump(
+            mode="json"
+        ),
+    })
+
+    assert result == {"learner_answers": answers}
+    assert captured["payload"]["kind"] == (
+        "assessment_submission"
+    )
+    assert captured["payload"]["expected_item_ids"] == [
+        "question-concept",
+        "question-location",
+        "practice-workflow",
+    ]
+    assert captured["payload"]["assessment"][
+        "assessment_id"
+    ] == "assessment-node"
+
+
+def test_collect_learner_answers_requires_assessment():
+    """没有评估包时不能进入答案中断。"""
+    with pytest.raises(
+        ValueError,
+        match="必须存在 AssessmentPackage",
+    ):
+        collect_learner_answers({})
 
 
 def test_evaluate_answers_rejects_unknown_item_id():

@@ -438,6 +438,15 @@ class AssessmentPackage(StrictModel):
 
         return self
 
+class AssessmentSubmission(StrictModel):
+    """学习者从 interrupt 恢复时提交的答案集。"""
+
+    answers: dict[str, str] = Field(
+        min_length=1,
+        description="题目或实践 ID 到学习者回答的映射",
+    )
+
+
 class ConceptEvaluationDraft(StrictModel):
     """LLM 对概念题回答产生的受限评分草稿。"""
 

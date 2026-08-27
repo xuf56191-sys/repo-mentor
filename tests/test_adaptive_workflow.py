@@ -4,11 +4,15 @@ from repo_mentor.workflow_state import create_initial_state
 from repo_mentor import adaptive_nodes
 
 from repo_mentor.models import (
+    AssessmentPackage,
     DailyPlan,
+    EvaluationResult,
     EvidenceSource,
     LearnerProfile,
     LearningRoadmap,
     LearningTask,
+    PracticeTask,
+    QuizQuestion,
     TargetTask,
     RepositoryEvidence,
     ReplanDecision,
@@ -19,6 +23,7 @@ from repo_mentor.adaptive_workflow import (
     build_adaptive_graph,
     make_thread_config,
     resume_adaptive_workflow,
+    resume_mastery_workflow,
     run_adaptive_workflow,
     start_adaptive_workflow,
     route_after_request,
@@ -103,6 +108,81 @@ def fake_generator(
         total_estimated_hours=1.0,
     )
 
+
+def fake_assessment_generator(
+    learner_profile,
+    learning_task,
+    repo_evidence,
+) -> AssessmentPackage:
+    """为端到端测试生成固定评估包。"""
+    source = learning_task.evidence_sources[0]
+    task_title = learning_task.title
+
+    return AssessmentPackage(
+        assessment_id="assessment-v07-e2e",
+        related_task_title=task_title,
+        difficulty="beginner",
+        questions=[
+            QuizQuestion(
+                question_id="question-concept",
+                question_type="concept",
+                prompt="目录树证据如何进入学习路线？",
+                expected_answer="读取真实仓库后作为路线证据",
+                difficulty="beginner",
+                related_task_title=task_title,
+                evidence_sources=[source],
+                knowledge_points=["目录树证据"],
+            ),
+            QuizQuestion(
+                question_id="question-location",
+                question_type="code_location",
+                prompt="目录树核心实现位于哪个文件？",
+                expected_answer="src/repository_tree.py",
+                difficulty="beginner",
+                related_task_title=task_title,
+                evidence_sources=[source],
+                knowledge_points=["代码定位"],
+            ),
+        ],
+        practice_task=PracticeTask(
+            practice_id="practice-tree-flow",
+            title="绘制目录树证据流程",
+            instructions="绘制目录树生成与消费路径",
+            expected_outcome="图示能够说明证据流向",
+            deliverable="Mermaid 流程图",
+            difficulty="beginner",
+            related_task_title=task_title,
+            evidence_sources=[source],
+            knowledge_points=["目录树证据"],
+            completion_criteria=["标明生成节点和消费节点"],
+            estimated_hours=0.5,
+        ),
+    )
+
+
+def fake_concept_evaluator(
+    question,
+    learner_answer,
+) -> EvaluationResult:
+    """端到端测试使用的离线概念评分器。"""
+    return EvaluationResult(
+        item_id=question.question_id,
+        item_type="quiz_question",
+        learner_response=learner_answer,
+        status="evaluated",
+        evaluation_method="model",
+        score=4,
+        max_score=question.max_score,
+        feedback="能部分说明证据流程，但缺少关键节点。",
+        knowledge_points=list(
+            question.knowledge_points
+        ),
+        source_files=[
+            source.file_path
+            for source in question.evidence_sources
+        ],
+    )
+
 def test_graph_has_expected_nodes():
     """图结构测试：10 个业务节点、有限证据循环和人工确认闭环均已注册。"""
     graph = build_adaptive_graph().get_graph()
@@ -160,6 +240,138 @@ def test_graph_has_expected_nodes():
                "apply_human_revision",
                "analyze_learner",
            ) in edges
+
+
+def test_mastery_graph_has_complete_v07_path():
+    """可选 V0.7 图应包含答案中断和掌握度闭环。"""
+    graph = build_adaptive_graph(
+        enable_mastery_loop=True
+    ).get_graph()
+    node_ids = set(graph.nodes)
+    edges = {
+        (edge.source, edge.target)
+        for edge in graph.edges
+    }
+
+    assert {
+        "generate_assessment",
+        "collect_learner_answers",
+        "evaluate_answers",
+        "update_profile",
+        "reflect_on_mastery",
+        "apply_mastery_replan",
+    } <= node_ids
+    assert {
+        ("confirm_roadmap", "generate_assessment"),
+        (
+            "generate_assessment",
+            "collect_learner_answers",
+        ),
+        (
+            "collect_learner_answers",
+            "evaluate_answers",
+        ),
+        ("evaluate_answers", "update_profile"),
+        ("update_profile", "reflect_on_mastery"),
+        (
+            "reflect_on_mastery",
+            "apply_mastery_replan",
+        ),
+        ("apply_mastery_replan", "__end__"),
+    } <= edges
+
+
+def test_v07_same_thread_completes_mastery_loop(
+    monkeypatch,
+    tmp_path: Path,
+):
+    """同一会话应两次恢复并产生证据驱动调整。"""
+    repository = tmp_path / "demo-repository"
+    repository.mkdir()
+    make_mini_repo(repository)
+
+    monkeypatch.setattr(
+        adaptive_nodes,
+        "generate_structured_roadmap",
+        fake_generator,
+    )
+    monkeypatch.setattr(
+        adaptive_nodes,
+        "generate_structured_assessment",
+        fake_assessment_generator,
+    )
+    monkeypatch.setattr(
+        adaptive_nodes,
+        "evaluate_concept_answer",
+        fake_concept_evaluator,
+    )
+
+    app = build_adaptive_graph(
+        enable_mastery_loop=True
+    )
+    thread_id = "v07-complete-loop"
+
+    confirmation_pause = start_adaptive_workflow(
+        app,
+        thread_id=thread_id,
+        repository_path=str(repository),
+        learner_profile=make_learner(),
+        target_task=make_target(),
+    )
+
+    assert "__interrupt__" in confirmation_pause
+    assert confirmation_pause["__interrupt__"][
+        0
+    ].value["kind"] == "roadmap_confirmation"
+
+    assessment_pause = resume_adaptive_workflow(
+        app,
+        thread_id=thread_id,
+        confirmation={"action": "approve"},
+    )
+
+    assert "__interrupt__" in assessment_pause
+    assessment_payload = assessment_pause[
+        "__interrupt__"
+    ][0].value
+    assert assessment_payload["kind"] == (
+        "assessment_submission"
+    )
+    assert assessment_payload["expected_item_ids"] == [
+        "question-concept",
+        "question-location",
+        "practice-tree-flow",
+    ]
+
+    final_result = resume_mastery_workflow(
+        app,
+        thread_id=thread_id,
+        answers={
+            "question-concept": "目录树会提供证据。",
+            "question-location": "wrong_file.py",
+            "practice-tree-flow": "已提交流程图。",
+        },
+    )
+
+    assert "__interrupt__" not in final_result
+    assert final_result["mastery"].overall_score == 0.2
+    assert set(final_result["mastery"].weak_points) == {
+        "目录树证据",
+        "代码定位",
+    }
+    assert final_result["replan_decision"].action == (
+        "add_review"
+    )
+    assert final_result["replan_count"] == 1
+    assert len(final_result["supplemental_tasks"]) == 1
+    assert final_result["supplemental_tasks"][
+        0
+    ].title.startswith("重点复习：")
+
+    final_snapshot = app.get_state(
+        make_thread_config(thread_id)
+    )
+    assert final_snapshot.next == ()
 
 def test_run_adaptive_workflow_returns_roadmap(
         monkeypatch,

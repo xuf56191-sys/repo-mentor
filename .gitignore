@@ -241,3 +241,9 @@ __pycache__/
 
 # Local generated outputs
 outputs/
+
+# Local SQLite learning progress
+data/*.db
+data/*.db-*
+data/*.sqlite
+data/*.sqlite-*
