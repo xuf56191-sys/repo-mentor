@@ -82,7 +82,7 @@ RepoMentor 后续将结合 openEuler 开源实习进行真实场景验证。
 
 ## 当前版本
 
-当前版本为 **V0.7 掌握度学习闭环已完成**
+当前版本为 **V0.7 掌握度闭环已完成 / V0.8 限定检索设计已完成**
 
 ## 当前已实现
 
@@ -186,6 +186,8 @@ RepoMentor 当前已经完成 V0.2 个性化路线原型、V0.4 真实仓库证�
   任务和评估结果表，支持重启后恢复路线和薄弱点；
 - 提供 `demo_mastery_loop.py` 离线端到端演示，
   记录初始路线、评估分数和证据驱动的任务调整；
+- 完成 `docs/retrieval-scope.md`，定义 V0.8 只索引当前学习模块相关的
+  README、docs、Python、测试和配置文件，并明确三层预算和不做项；
 - 自适应工作流和掌握度模型均有自动化测试，
   当前完整测试集为 **171 passed**。
 
@@ -621,6 +623,7 @@ Pydantic 对象使用 JSON 保存，仓库 ID、任务类型、顺序和时间�
 - 当前尚未提供交互式 UI，人工确认通过工作流入口提交；
 - V0.7 当前完成一轮评估和最多一次重规划，
   尚未自动进入补充任务的第二轮评估；
+- V0.8 当前完成限定检索设计，尚未实现切块、索引存储或向量检索；
 - SQLite 已持久化学习进度，但 LangGraph 运行位置仍由
   `InMemorySaver` 保存，进程重启后不能恢复未完成的中断点；
 - 当前不自动修改代码、不自动创建 PR。
@@ -767,7 +770,7 @@ python -m pytest tests/test_target_tool_calling.py -v
 按照以下顺序继续开发：
 
 1. 增加开源贡献准备度评估；
-2. 增加代码库 RAG 问答；
+2. 实现 V0.8 当前学习模块的候选准入、结构切块和限定检索；
 3. 将内存 checkpoint 升级为持久化存储；
 4. 将人工复核结论接回第二轮掌握度评估；
 5. 提供用户可交互界面。
@@ -794,6 +797,7 @@ repo-mentor/
 ├── docs/
 │   ├── design-decisions.md
 │   ├── learning-log.md
+│   ├── retrieval-scope.md
 │   ├── product-positioning.md
 │   └── prompt-experiments.md
 ├── evaluation/
