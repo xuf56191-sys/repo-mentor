@@ -82,7 +82,7 @@ RepoMentor 后续将结合 openEuler 开源实习进行真实场景验证。
 
 ## 当前版本
 
-当前版本为 **V0.7 掌握度闭环已完成 / V0.8 限定检索设计已完成**
+当前版本为 **V0.7 掌握度闭环已完成 / V0.8 定向文档加载与混合检索已完成**
 
 ## 当前已实现
 
@@ -188,8 +188,18 @@ RepoMentor 当前已经完成 V0.2 个性化路线原型、V0.4 真实仓库证�
   记录初始路线、评估分数和证据驱动的任务调整；
 - 完成 `docs/retrieval-scope.md`，定义 V0.8 只索引当前学习模块相关的
   README、docs、Python、测试和配置文件，并明确三层预算和不做项；
+- 新增严格 `ScopedDocument`、`DocumentChunk`、`RetrievalHit`
+  和 `RetrievalResult` 模型；
+- 新增 `load_documents()`，只加载当前路线证据和目标排序中
+  通过安全、类型、大小和预算检查的候选文件；
+- 新增结构感知轻量切分，按 Markdown 标题、Python 类/函数和配置 section
+  保留 `source_path`、`line_start`、`line_end` 和符号元数据；
+- 新增离线 `ScopedHybridRetriever`，结合本地特征哈希向量、
+  受控概念扩展和精确关键词/标识符匹配；
+- 新增 10 个学习问题真实来源 Top-3 评测，并验证无关问题
+  返回证据不足；
 - 自适应工作流和掌握度模型均有自动化测试，
-  当前完整测试集为 **171 passed**。
+  当前完整测试集为 **184 passed**。
 
 
 
@@ -602,6 +612,69 @@ Pydantic 对象使用 JSON 保存，仓库 ID、任务类型、顺序和时间�
 `LearningRoadmap`、`MasteryProfile`、`ReplanDecision`、补充任务和
 `EvaluationResult`。数据库文件保存在本地并已加入 `.gitignore`。
 
+## V0.8 定向文档加载与混合检索
+
+### 目标限定文档加载
+
+`document_loader.py` 不读取整个仓库，而是合并：
+
+```text
+LearningTask.evidence_sources
++ rank_target_files(TargetTask)
+→ 安全/类型/大小/预算过滤
+→ ScopedDocument
+```
+
+当前允许 README、docs、Python、相关测试和配置文件。
+二进制、图片、忽略目录、敏感路径、符号链接逃逸和过大文件不会进入。
+
+`repository_scope_id` 由规范仓库路径稳定生成；
+`module_scope_id` 由目标、当前学习任务和已批准证据路径共同生成。
+任务或证据范围变化会得到不同模块 ID，防止旧索引串入。
+
+### 带真实行号的轻量切分
+
+`split_documents()` 优先保留语义结构：
+
+```text
+Markdown / RST → 标题边界
+Python         → 顶层类和函数边界
+配置           → section 边界
+过长片段       → 连续行窗口
+```
+
+每个 `DocumentChunk` 保存仓库和模块范围、源路径、起止行、
+标题或符号、内容哈希和相关理由。
+原文字段显式保留开头空行，避免 Pydantic 自动清理导致行号偏移。
+
+### 混合检索
+
+`hybrid_retriever.py` 同时计算：
+
+* `vector_score`：中英文、标识符子词、中文 n-gram 和受控概念扩展
+  生成的本地特征哈希向量余弦分数；
+* `keyword_score`：问题与内容、路径、函数或类名的精确匹配分数；
+* 目标相关性先验：文档在加载阶段的相关得分。
+
+查询包含 CamelCase 或下划线符号时，关键词权重更高；
+自然语言问题则提高向量权重。
+纯向量命中使用更高的证据充分阈值，减少特征哈希碰撞的假相关。
+
+当前向量器是离线、可重复的本地基线，通过受控概念扩展提供有限语义能力，
+不等同于预训练神经 Embedding。后续可以替换向量编码器，
+但仓库/模块过滤、文档准入、来源元数据和证据阈值不变。
+
+### Retriever 评测
+
+```powershell
+$env:PYTHONPATH = "$(Resolve-Path .);$(Resolve-Path .\src)"
+python -m repo_mentor.retrieval_evaluation
+```
+
+评测使用 RepoMentor 自身的真实 README、设计文档和 Python 文件。
+10 个学习问题的预期真实来源均进入 Top-3，
+仓库范围外的蛋糕问题返回证据不足。
+
 ## 当前限制
 
 当前项目已完成 V0.6 自适应工作流和 V0.7 掌握度学习闭环。
@@ -623,7 +696,8 @@ Pydantic 对象使用 JSON 保存，仓库 ID、任务类型、顺序和时间�
 - 当前尚未提供交互式 UI，人工确认通过工作流入口提交；
 - V0.7 当前完成一轮评估和最多一次重规划，
   尚未自动进入补充任务的第二轮评估；
-- V0.8 当前完成限定检索设计，尚未实现切块、索引存储或向量检索；
+- V0.8 已完成内存文档加载、结构切分和离线混合检索，
+  尚未持久化检索索引，本地向量器也不是预训练神经 Embedding；
 - SQLite 已持久化学习进度，但 LangGraph 运行位置仍由
   `InMemorySaver` 保存，进程重启后不能恢复未完成的中断点；
 - 当前不自动修改代码、不自动创建 PR。
@@ -748,7 +822,14 @@ roadmap_confirmation
   不同仓库数据隔离；
 - 新 Store 对象可恢复路线、薄弱点、评估结果和补充任务；
 - 事务失败后不残留部分 plan、task 或 assessment result；
-- 当前完整测试集为 **171 passed**。
+- 限定 Loader 排除忽略目录、敏感、二进制、图片和过大文件；
+- 文档预算限制最大文件数和总字符数；
+- 片段起止行可以还原真实源文本，文件开头空行不会导致行号偏移；
+- 已批准证据路径变化时 `module_scope_id` 同步变化；
+- 自然语言改写和精确函数名分别由向量分数和关键词分数支持；
+- 其他仓库或模块的片段在检索器初始化时被过滤；
+- 10 个 V0.8 学习问题的真实来源进入 Top-3，无关问题证据不足；
+- 当前完整测试集为 **184 passed**。
 
 运行全部测试：
 
@@ -770,7 +851,7 @@ python -m pytest tests/test_target_tool_calling.py -v
 按照以下顺序继续开发：
 
 1. 增加开源贡献准备度评估；
-2. 实现 V0.8 当前学习模块的候选准入、结构切块和限定检索；
+2. 将 V0.8 检索结果接入学习解释、测验和重规划节点；
 3. 将内存 checkpoint 升级为持久化存储；
 4. 将人工复核结论接回第二轮掌握度评估；
 5. 提供用户可交互界面。
@@ -829,6 +910,10 @@ repo-mentor/
 │       ├── mastery_updater.py
 │       ├── mastery_replanner.py
 │       ├── progress_store.py
+│       ├── retrieval_models.py
+│       ├── document_loader.py
+│       ├── hybrid_retriever.py
+│       ├── retrieval_evaluation.py
 │       ├── checkpoint_interrupt_demo.py
 │       ├── demo_adaptive_flow.py
 │       └── demo_mastery_loop.py
@@ -846,6 +931,9 @@ repo-mentor/
 │   ├── test_mastery_replanner.py
 │   ├── test_progress_store.py
 │   ├── test_demo_mastery_loop.py
+│   ├── test_document_loader.py
+│   ├── test_hybrid_retriever.py
+│   ├── test_retrieval_evaluation.py
 │   ├── test_roadmap_confirmation.py
 │   └── test_adaptive_workflow.py
 ├── pytest.ini
