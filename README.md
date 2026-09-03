@@ -82,7 +82,7 @@ RepoMentor 后续将结合 openEuler 开源实习进行真实场景验证。
 
 ## 当前版本
 
-当前版本为 **V0.7 掌握度闭环已完成 / V0.8 定向文档加载与混合检索已完成**
+当前版本为 **V1.0：目标限定学习闭环与贡献准备演示版**
 
 ## 当前已实现
 
@@ -196,10 +196,10 @@ RepoMentor 当前已经完成 V0.2 个性化路线原型、V0.4 真实仓库证�
   保留 `source_path`、`line_start`、`line_end` 和符号元数据；
 - 新增离线 `ScopedHybridRetriever`，结合本地特征哈希向量、
   受控概念扩展和精确关键词/标识符匹配；
-- 新增 10 个学习问题真实来源 Top-3 评测，并验证无关问题
-  返回证据不足；
+- 新增 20 个公开评测案例：16 个真实来源 Top-3 问题和
+  4 个越界拒答问题；
 - 自适应工作流和掌握度模型均有自动化测试，
-  当前完整测试集为 **184 passed**。
+  当前完整测试集为 **197 passed**。
 
 
 
@@ -672,8 +672,84 @@ python -m repo_mentor.retrieval_evaluation
 ```
 
 评测使用 RepoMentor 自身的真实 README、设计文档和 Python 文件。
-10 个学习问题的预期真实来源均进入 Top-3，
-仓库范围外的蛋糕问题返回证据不足。
+`evaluation/retrieval_cases.json` 包含 20 个公开案例：16 个来源问题和
+4 个越界问题。当前来源问题 Top-3 命中率为 100%，越界拒答率为 100%。
+
+### 带来源学习问答与共用证据层
+
+`answer_learning_question()` 只概括 Retriever 返回的局部片段，
+每条结论带 `source_path:line_start-line_end` 和原文摘录。
+没有足够命中时返回明确拒答，不用模型常识补全仓库事实。
+
+`LearningEvidenceLayer` 保存一次加载和切分结果，路线生成、测验生成和
+学习问答复用同一组 `DocumentChunk`。`AgentState.retrieval_chunks`
+使用独立字段，节点只返回局部更新，避免覆盖其他状态或重复索引仓库。
+
+## V0.9/V1.0 Issue 驱动贡献准备
+
+### TargetIssue 与贡献差距
+
+`TargetIssue` 严格保存用户手动提供的标题、描述、labels、预期结果、
+截止日期和参考信息；描述或预期结果不足时先提问，不声称自动获取或解决 Issue。
+
+`analyze_contribution_gap()` 将 Issue 映射到目标能力、已掌握项、待补知识、
+推荐文件和实践任务。准备度满分 100，由 Issue 清晰度 20、技能覆盖 35、
+证据覆盖 25、测试准备 10、贡献流程准备 10 五项相加，所有分项可解释、可复算。
+
+### openEuler/openGauss 本地模式
+
+`openEuler_mode` 只使用用户选择的本地小仓库、手动 Issue、README、
+CONTRIBUTING 和项目元数据，输出环境、规范和前置知识清单。
+真实 Plugin #1626 案例见
+[`docs/case-study-openeuler.md`](docs/case-study-openeuler.md)。
+案例同时记录有效推荐和 C++/SQL/Java 索引不足等限制，不夸大效率提升。
+
+### Streamlit 界面
+
+界面输入学习者基础、目标 Issue、仓库路径和可用时间，展示每日路线、
+真实来源、限定问答、概念题、代码定位题、实践题、掌握度和贡献准备度。
+答题结果和路线可以保存到本地 SQLite；页面不接收、不打印 API Key。
+
+```powershell
+pip install -r requirements-ui.txt
+$env:PYTHONPATH = (Resolve-Path .\src).Path
+streamlit run app.py
+```
+
+界面业务逻辑位于 `ui_service.py`，Streamlit 只负责表单、
+`session_state` 和展示，因此核心测试无需启动浏览器或调用真实 API。
+
+## V1.0 架构
+
+```mermaid
+flowchart LR
+    U[学习者画像 + 手动 TargetIssue] --> S[安全仓库准入]
+    S --> L[限定 Loader + 结构切分]
+    L --> R[Scoped Hybrid Retriever]
+    R --> A[带来源问答]
+    R --> P[个性化学习路线]
+    R --> Q[概念/定位/实践测验]
+    Q --> M[掌握度画像与有界重规划]
+    M --> G[贡献差距 + 可解释准备度]
+    G --> O[openEuler 贡献清单]
+    P --> UI[Streamlit]
+    A --> UI
+    Q --> UI
+    G --> UI
+    UI --> DB[(SQLite 学习进度)]
+```
+
+### 与 RepoMind 类通用仓库工具的区别
+
+| 维度 | RepoMentor | RepoMind 类通用仓库问答/理解工具 |
+|---|---|---|
+| 核心目标 | 帮特定学习者为特定 Issue 建立学习和贡献准备路线 | 回答更广泛的仓库问题或理解整体代码库 |
+| 检索范围 | 当前仓库 + 当前学习模块 + 已批准来源 | 通常覆盖更大的仓库范围 |
+| 输出 | 每日任务、测验、掌握度、差距和准备度 | 问答、搜索或架构解释 |
+| 证据不足 | 明确拒答或请求更具体目标 | 取决于具体产品实现 |
+| 自动改代码 | 不做 | 不是本项目比较和声明的重点 |
+
+这里的比较是产品定位差异，不代表对其他工具能力作完整评测。
 
 ## 当前限制
 
@@ -693,11 +769,15 @@ python -m repo_mentor.retrieval_evaluation
 - 当路径证据不足时，工作流最多补读两个目标相关候选文件，
   不会扫描或批量读取整个仓库；
 - 当前 checkpoint 使用进程内存保存，服务重启后不能恢复旧会话；
-- 当前尚未提供交互式 UI，人工确认通过工作流入口提交；
+- 已提供 Streamlit 演示界面，但尚未做多用户鉴权和生产部署；
 - V0.7 当前完成一轮评估和最多一次重规划，
   尚未自动进入补充任务的第二轮评估；
 - V0.8 已完成内存文档加载、结构切分和离线混合检索，
   尚未持久化检索索引，本地向量器也不是预训练神经 Embedding；
+- 当前 Loader 尚未支持 C/C++、SQL 和 Java，真实 Plugin #1626 案例
+  因此仍需人工提供这些文件的定位结论；
+- openEuler 模式不自动访问远程 Issue、SIG、维护者意见或 CI 状态；
+- 贡献准备度是能力与证据覆盖指标，不是 PR 合入概率；
 - SQLite 已持久化学习进度，但 LangGraph 运行位置仍由
   `InMemorySaver` 保存，进程重启后不能恢复未完成的中断点；
 - 当前不自动修改代码、不自动创建 PR。
@@ -829,7 +909,7 @@ roadmap_confirmation
 - 自然语言改写和精确函数名分别由向量分数和关键词分数支持；
 - 其他仓库或模块的片段在检索器初始化时被过滤；
 - 10 个 V0.8 学习问题的真实来源进入 Top-3，无关问题证据不足；
-- 当前完整测试集为 **184 passed**。
+- 当前完整测试集为 **197 passed**（核心回归离线运行，无需真实 API）。
 
 运行全部测试：
 
@@ -847,14 +927,9 @@ python -m pytest tests/test_target_tool_calling.py -v
 
 ## 后续计划
 
-项目将在已完成的 V0.7 掌握度学习闭环和 SQLite 进度存储上，
-按照以下顺序继续开发：
-
-1. 增加开源贡献准备度评估；
-2. 将 V0.8 检索结果接入学习解释、测验和重规划节点；
-3. 将内存 checkpoint 升级为持久化存储；
-4. 将人工复核结论接回第二轮掌握度评估；
-5. 提供用户可交互界面。
+V1.0 之后优先补齐 C/C++、SQL、Java 的安全结构切分和真实来源评测，
+再考虑持久化 LangGraph checkpoint、人工复核后的第二轮掌握度评估，
+以及多用户部署。不会为了扩大功能而取消目标范围、预算和保守拒答边界。
 
 ## 当前暂不实现
 
@@ -877,6 +952,8 @@ repo-mentor/
 │   └── evaluation/
 ├── docs/
 │   ├── design-decisions.md
+│   ├── case-study-openeuler.md
+│   ├── demo-script-v1.md
 │   ├── learning-log.md
 │   ├── retrieval-scope.md
 │   ├── product-positioning.md
@@ -914,6 +991,13 @@ repo-mentor/
 │       ├── document_loader.py
 │       ├── hybrid_retriever.py
 │       ├── retrieval_evaluation.py
+│       ├── grounded_qa.py
+│       ├── learning_evidence.py
+│       ├── contribution_models.py
+│       ├── target_issue.py
+│       ├── contribution_analyzer.py
+│       ├── openeuler_mode.py
+│       ├── ui_service.py
 │       ├── checkpoint_interrupt_demo.py
 │       ├── demo_adaptive_flow.py
 │       └── demo_mastery_loop.py
@@ -937,6 +1021,8 @@ repo-mentor/
 │   ├── test_roadmap_confirmation.py
 │   └── test_adaptive_workflow.py
 ├── pytest.ini
+├── app.py
+├── requirements-ui.txt
 ├── .env.example
 ├── .gitignore
 ├── README.md

@@ -65,6 +65,10 @@ from repo_mentor.mastery_replanner import (
     build_supplemental_task,
     decide_replan,
 )
+from repo_mentor.learning_evidence import (
+    merge_repository_evidence,
+    retrieval_context_from_chunks,
+)
 
 # ---------------- 节点 1：检查原始请求信息（纯规则，无 LLM） ----------------
 
@@ -441,11 +445,30 @@ def generate_roadmap(state: AgentState) -> dict:
     target_task = state["target_task"].model_dump(mode="json")
 
     # 内部会创建 LLM、做结构化输出，并校验 LearningRoadmap
+    generator_kwargs = {
+        "user_profile": user_profile,
+        "target_task": target_task,
+        "repository_readme": state["repo_readme"],
+        "repository_tree": state["repo_tree"],
+    }
+    chunks = state.get("retrieval_chunks") or []
+    if chunks:
+        retrieval_context, _ = retrieval_context_from_chunks(
+            chunks,
+            " ".join(
+                [
+                    state["target_task"].title,
+                    state["target_task"].description,
+                    state["target_task"].expected_outcome,
+                ]
+            ),
+        )
+        generator_kwargs["retrieval_context"] = (
+            retrieval_context
+        )
+
     roadmap = generate_structured_roadmap(
-        user_profile=user_profile,
-        target_task=target_task,
-        repository_readme=state["repo_readme"],
-        repository_tree=state["repo_tree"],
+        **generator_kwargs,
     )
     return {"roadmap": roadmap}
 
@@ -651,13 +674,28 @@ def generate_assessment(
             "当前 LearningRoadmap 中没有可评估任务"
         )
 
+    repo_evidence = state.get("repo_evidence", [])
+    chunks = state.get("retrieval_chunks") or []
+    if chunks:
+        _, retrieved = retrieval_context_from_chunks(
+            chunks,
+            " ".join(
+                [
+                    learning_task.title,
+                    learning_task.objective,
+                    learning_task.code_location_task,
+                ]
+            ),
+        )
+        repo_evidence = merge_repository_evidence(
+            repo_evidence,
+            retrieved,
+        )
+
     assessment = generate_structured_assessment(
         learner_profile=state["learner_profile"],
         learning_task=learning_task,
-        repo_evidence=state.get(
-            "repo_evidence",
-            [],
-        ),
+        repo_evidence=repo_evidence,
     )
 
     return {

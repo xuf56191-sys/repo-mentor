@@ -99,3 +99,45 @@ class RetrievalResult(StrictModel):
     hits: list[RetrievalHit] = Field(default_factory=list)
     evidence_sufficient: bool
     reason: str = Field(min_length=3)
+
+
+class SourceCitation(StrictModel):
+    """回答中可以定位回真实仓库文件的引用。"""
+
+    source_path: str = Field(min_length=1)
+    line_start: int = Field(ge=1)
+    line_end: int = Field(ge=1)
+    excerpt: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_line_range(self) -> "SourceCitation":
+        if self.line_end < self.line_start:
+            raise ValueError(
+                "line_end 不能小于 line_start"
+            )
+        return self
+
+
+class GroundedLearningAnswer(StrictModel):
+    """只回答当前学习任务且带真实来源的结果。"""
+
+    question: str = Field(min_length=1)
+    answer: str = Field(min_length=1)
+    citations: list[SourceCitation] = Field(
+        default_factory=list
+    )
+    evidence_sufficient: bool
+    uncertainty: str | None = None
+    scope_note: str = Field(min_length=3)
+
+    @model_validator(mode="after")
+    def validate_grounding(self) -> "GroundedLearningAnswer":
+        if self.evidence_sufficient and not self.citations:
+            raise ValueError(
+                "证据充分的回答必须至少包含一个引用"
+            )
+        if not self.evidence_sufficient and self.citations:
+            raise ValueError(
+                "拒答结果不应携带未经确认的引用"
+            )
+        return self

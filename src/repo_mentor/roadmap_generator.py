@@ -76,6 +76,7 @@ def generate_structured_roadmap(
     target_task: dict,
     repository_readme: str,
     repository_tree: str,
+    retrieval_context: str = "",
 ) -> LearningRoadmap:
     """根据指定输入生成结构化学习路线。"""
     llm = create_llm(
@@ -101,7 +102,15 @@ def generate_structured_roadmap(
             ensure_ascii=False,
             indent=2,
         ),
-        "repository_readme": repository_readme,
+        "repository_readme": (
+            repository_readme
+            + (
+                "\n\n## 当前学习模块检索证据\n"
+                + retrieval_context
+                if retrieval_context.strip()
+                else ""
+            )
+        ),
         "repository_tree": repository_tree,
     }
 

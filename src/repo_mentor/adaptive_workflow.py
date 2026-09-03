@@ -21,6 +21,7 @@ from repo_mentor.models import (
     ReplanDecision,
     TargetTask,
 )
+from repo_mentor.retrieval_models import DocumentChunk
 from repo_mentor.workflow_state import (
     AgentState,
     create_initial_state,
@@ -47,6 +48,7 @@ CHECKPOINT_ALLOWED_MSGPACK_MODULES = [
     ("repo_mentor.models", "KnowledgeMasteryEvidence"),
     ("repo_mentor.models", "ReplanDecision"),
     ("repo_mentor.models", "LearningTask"),
+    ("repo_mentor.retrieval_models", "DocumentChunk"),
     (
         "repo_mentor.repository_safeguards",
         "EvidenceBudget",
@@ -247,6 +249,7 @@ def start_adaptive_workflow(
     repository_path: str,
     learner_profile: LearnerProfile,
     target_task: TargetTask,
+    retrieval_chunks: list[DocumentChunk] | None = None,
 ) -> dict[str, Any]:
     """启动一个会话，通常在路线确认节点返回 interrupt。"""
     initial = {
@@ -254,6 +257,7 @@ def start_adaptive_workflow(
         "learner_input": learner_profile.model_dump(mode="json"),
         "target_input": target_task.model_dump(mode="json"),
         "repository_path": repository_path,
+        "retrieval_chunks": list(retrieval_chunks or []),
     }
     return app.invoke(
         initial,

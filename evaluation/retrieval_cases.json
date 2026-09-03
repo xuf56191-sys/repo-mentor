@@ -1,0 +1,22 @@
+[
+  {"question": "MAX_TEXT_FILE_BYTES 单文件字节上限在哪里定义？", "expected_paths": ["src/repo_mentor/repository_reader.py"], "should_refuse": false},
+  {"question": "目录树如何限制 max_depth 和 max_files？", "expected_paths": ["src/repo_mentor/repository_tree.py"], "should_refuse": false},
+  {"question": "rank_target_files 如何根据 TargetTask 排序候选文件？", "expected_paths": ["src/repo_mentor/repository_ranker.py"], "should_refuse": false},
+  {"question": "ensure_safe_relative_path 如何拒绝 .env 敏感路径？", "expected_paths": ["src/repo_mentor/repository_tools.py", "src/repo_mentor/repository_tree.py"], "should_refuse": false},
+  {"question": "EvidenceBudget 如何限制文件数和字符数？", "expected_paths": ["src/repo_mentor/repository_safeguards.py"], "should_refuse": false},
+  {"question": "DocumentChunk 如何保留 source_path 和 line_start？", "expected_paths": ["src/repo_mentor/retrieval_models.py", "src/repo_mentor/document_loader.py"], "should_refuse": false},
+  {"question": "_segment_starts 如何用 ast 按 Python 类和函数边界切分？", "expected_paths": ["src/repo_mentor/document_loader.py"], "should_refuse": false},
+  {"question": "混合检索如何合并 vector_score 和 keyword_score？", "expected_paths": ["src/repo_mentor/hybrid_retriever.py"], "should_refuse": false},
+  {"question": "为什么 RepoMentor 不做全仓 RAG 和安全分析？", "expected_paths": ["docs/retrieval-scope.md"], "should_refuse": false},
+  {"question": "repository_scope_id 和 module_scope_id 如何防止检索串数据？", "expected_paths": ["src/repo_mentor/retrieval_models.py", "src/repo_mentor/hybrid_retriever.py", "docs/retrieval-scope.md"], "should_refuse": false},
+  {"question": "answer_learning_question 如何在证据不足时拒绝猜测？", "expected_paths": ["src/repo_mentor/grounded_qa.py"], "should_refuse": false},
+  {"question": "SourceCitation 如何校验文件行号范围？", "expected_paths": ["src/repo_mentor/retrieval_models.py"], "should_refuse": false},
+  {"question": "LearningEvidenceLayer 如何让路线测验和问答复用 chunks？", "expected_paths": ["src/repo_mentor/learning_evidence.py"], "should_refuse": false},
+  {"question": "merge_repository_evidence 如何避免重复证据和覆盖状态？", "expected_paths": ["src/repo_mentor/learning_evidence.py"], "should_refuse": false},
+  {"question": "classify_scoped_file 如何识别 CONTRIBUTING 文档？", "expected_paths": ["src/repo_mentor/document_loader.py"], "should_refuse": false},
+  {"question": "ScopedHybridRetriever 对精确 snake_case 标识符如何调整关键词权重？", "expected_paths": ["src/repo_mentor/hybrid_retriever.py"], "should_refuse": false},
+  {"question": "怎样烤制草莓奶油蛋糕？", "expected_paths": [], "should_refuse": true},
+  {"question": "请预测下周黄金和股票价格。", "expected_paths": [], "should_refuse": true},
+  {"question": "明天上海天气适合穿什么？", "expected_paths": [], "should_refuse": true},
+  {"question": "如何练习法语口语和发音？", "expected_paths": [], "should_refuse": true}
+]

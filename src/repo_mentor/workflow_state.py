@@ -29,6 +29,7 @@ from repo_mentor.models import (
     LearningTask,
     ReplanDecision,
 )
+from repo_mentor.retrieval_models import DocumentChunk
 
 from repo_mentor.models import (
     LearnerProfile,
@@ -55,6 +56,9 @@ class AgentState(TypedDict, total=False):
         list[RepositoryEvidence],
         operator.add,                        # 累积: 多次 collect_evidence 追加
     ]
+    # V0.8：一次加载和切分后由路线、测验、问答共同复用。
+    # 不使用 reducer，更新其他 State 字段时不会覆盖它。
+    retrieval_chunks: list[DocumentChunk]
 
     # ---------- 输出 ----------
     roadmap: LearningRoadmap | None                 # 产生: generate_roadmap; 消费: 最终输出
@@ -125,6 +129,7 @@ def create_initial_state(
         "learner_profile":learner_profile,
         "target_task":target_task,
         "repo_evidence":[],
+        "retrieval_chunks": [],
         "mastery": None,
         "messages":[],
         "errors":[],
